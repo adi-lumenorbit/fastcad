@@ -257,6 +257,7 @@ mod_call: CNAME "(" arg_list? ")"
 arg_list: arg ("," arg)*
 ?arg: expr                      -> arg_pos
     | CNAME "=" expr            -> arg_kw
+    | SPECIAL_VAR "=" expr      -> arg_kw
 
 // names: CNAME or special $-prefixed (only $fn / $fa / $fs allowed)
 ?name: CNAME -> bare_name
