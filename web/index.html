@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>fastcad</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/vendor/three.module.js",
+      "three/addons/controls/OrbitControls.js": "/vendor/OrbitControls.js"
+    }
+  }
+  </script>
+  <script defer src="/vendor/rrweb.min.js"></script>
+  <script defer src="/vendor/html2canvas.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <div id="viewer-pane">
+      <canvas id="viewer" data-testid="viewer"></canvas>
+      <div id="viewer-overlay">
+        <button id="undo-btn" data-testid="undo-btn" type="button">Undo</button>
+        <button id="redo-btn" data-testid="redo-btn" type="button">Redo</button>
+        <button id="export-btn" data-testid="export-btn" type="button">Export .scad</button>
+        <button id="reset-btn" data-testid="reset-btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div id="chat-pane">
+      <div id="chat-log" data-testid="chat-log" role="log" aria-live="polite"></div>
+      <div id="ask-user-area" data-testid="ask-user-area" hidden></div>
+      <form id="chat-form">
+        <input id="chat-input" data-testid="chat-input" type="text"
+               autocomplete="off" placeholder="Try: make a 20mm cube" />
+        <button id="chat-send-btn" data-testid="chat-send-btn" type="submit">Send</button>
+      </form>
+      <div id="feedback-bar">
+        <button id="feedback-point-btn" data-testid="feedback-point-btn" type="button"
+                title="Click an element to attach feedback to it">Point</button>
+        <button id="feedback-send-btn" data-testid="feedback-send-btn" type="button">Send Feedback</button>
+        <span id="feedback-status" data-testid="feedback-status"></span>
+      </div>
+    </div>
+  </div>
+  <div id="vendor-warning" hidden>
+    <p>Browser libraries missing under <code>web/vendor/</code>.</p>
+    <p>Run <code>bash scripts/fetch-vendor.sh</code> on the WSL host then refresh.</p>
+  </div>
+  <script type="module" src="/main.js"></script>
+  <script type="module" src="/feedback.js"></script>
+</body>
+</html>
