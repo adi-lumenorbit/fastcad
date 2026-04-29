@@ -164,7 +164,7 @@ html, body {
   outline-offset: 2px;
 }
 
-#vendor-warning {
+#vendor-warning:not([hidden]) {
   position: fixed;
   inset: 0;
   display: flex;
