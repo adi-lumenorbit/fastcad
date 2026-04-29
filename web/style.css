@@ -38,6 +38,26 @@ html, body {
   gap: 8px;
 }
 
+#viewer-help {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: #888;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 4px 10px;
+  border-radius: 4px;
+  pointer-events: none;
+  user-select: none;
+}
+
+#viewer-help b {
+  color: #ddd;
+  font-weight: 600;
+}
+
 #viewer-overlay button {
   padding: 6px 12px;
   background: rgba(0, 0, 0, 0.55);

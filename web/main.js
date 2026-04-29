@@ -25,12 +25,41 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x202020);
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
-camera.position.set(80, -80, 60);
+const HOME_POSITION = new THREE.Vector3(80, -80, 60);
+const HOME_TARGET = new THREE.Vector3(0, 0, 0);
+camera.position.copy(HOME_POSITION);
 camera.up.set(0, 0, 1);
 
 const controls = new OrbitControls(camera, canvas);
-controls.target.set(0, 0, 0);
+controls.target.copy(HOME_TARGET);
+controls.screenSpacePanning = true;        // CAD-style: pan slides parallel to screen
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.listenToKeyEvents(window);        // arrow keys pan when window has focus
+controls.keyPanSpeed = 14;
 controls.update();
+
+function recenterCamera() {
+  // Auto-frame on visible meshes if any, else go home.
+  if (window.fastcad && window.fastcad.meshMap && window.fastcad.meshMap.size > 0) {
+    const box = new THREE.Box3();
+    for (const m of window.fastcad.meshMap.values()) box.expandByObject(m);
+    if (!box.isEmpty()) {
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3()).length() || 50;
+      controls.target.copy(center);
+      const dir = new THREE.Vector3(1, -1, 0.75).normalize();
+      camera.position.copy(center).addScaledVector(dir, size * 1.6);
+      camera.up.set(0, 0, 1);
+      controls.update();
+      return;
+    }
+  }
+  camera.position.copy(HOME_POSITION);
+  controls.target.copy(HOME_TARGET);
+  camera.up.set(0, 0, 1);
+  controls.update();
+}
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.45));
 const dir = new THREE.DirectionalLight(0xffffff, 0.85);
@@ -261,6 +290,14 @@ document.getElementById("undo-btn").addEventListener("click", () => send({ type:
 document.getElementById("redo-btn").addEventListener("click", () => send({ type: "redo" }));
 document.getElementById("export-btn").addEventListener("click", () => send({ type: "export_scad" }));
 document.getElementById("reset-btn").addEventListener("click", () => send({ type: "reset" }));
+const homeBtn = document.getElementById("home-btn");
+if (homeBtn) homeBtn.addEventListener("click", recenterCamera);
+
+// Keyboard: 'h' to recenter (when canvas has focus)
+window.addEventListener("keydown", (ev) => {
+  if (ev.target instanceof HTMLInputElement) return;  // don't steal chat input
+  if (ev.key === "h" || ev.key === "H") recenterCamera();
+});
 
 // ---------------------------------------------------------------------------
 // Hooks for feedback.js + e2e tests
