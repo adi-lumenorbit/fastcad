@@ -12,12 +12,23 @@ pieces done; **MISS** = not started; **BUG** = known broken; **—** = N/A.
 |----|------|-------|--------|-------|---------|------|-------|--------|-----|----------|-------|
 | 01 | [Bootstrap fastcad vertical slice](./01-bootstrap.md) | — | OK | OK | OK | OK | OK | OK | OK | OK | OK |
 
+## Stage 1 — `.scad`-as-spec
+
+Replaces the flat-CSG op log with a `.scad`-source-as-spec model:
+single representation end-to-end (the agent reads, rewrites, and
+exports the same `.scad` string), backed by a Python parser +
+manifold3d evaluator with dependency-aware caching.
+
+| #  | Item | Issue | parser | eval | faces | diff | kernel | session | ws | agent | tests |
+|----|------|-------|--------|------|-------|------|--------|---------|----|-------|-------|
+| 02 | [.scad-as-spec](./02-stage1-scad-spec.md) | [#2](https://github.com/adi-lumenorbit/fastcad/issues/2) | MISS | MISS | MISS | MISS | PARTIAL | MISS | MISS | MISS | MISS |
+
 ## Roadmap (filed as issues when scoped)
 
 | Title | Notes |
 |-------|-------|
-| Face / edge / plane anchors | Replace bbox-only anchors in `scene.resolve_anchor` with named faces from manifold3d. New tools in `agent/tools.py`: `pick_face`, `pick_edge`. |
-| Parametric constraints | Persist parametric expressions per node so dimensions can be edited after the fact. |
-| Snapshot-based undo | Replace full-replay rebuild in `session._rebuild` with periodic Manifold snapshots for large scenes. |
-| Multi-user / save+load | Serialize op log JSON; load from disk on connect; per-session storage. |
-| Real-OpenSCAD round-trip import | Parse a subset of `.scad` back into ops for editing imported models. |
+| manifold3d face_id tracking through booleans | Replace semantic-name faces with real face-ids that survive CSG. Stage 2 sharpening of Stage 1's face publisher. |
+| `function` / `hull` / `minkowski` / `offset` | Stage 1.5 — extend the parser+evaluator with the OpenSCAD subset deferred from Stage 1. |
+| `.scad` import (round-trip from disk) | Upload UI; load arbitrary `.scad` files into a fastcad session for editing. |
+| Snapshot-based undo | If the per-feature cache outgrows memory, persist module-level snapshots. |
+| Multi-user / save+load | Serialize current_source to disk on connect; per-session storage. |
