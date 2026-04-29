@@ -14,9 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .model.ops import ChangeSet
 from .model.scad_eval import ModuleEval
-from .model.spec_diff import diff_and_evaluate
+from .model.spec_diff import ChangeSet, diff_and_evaluate
 
 
 INITIAL_SOURCE = "// fastcad spec — empty scene\n"

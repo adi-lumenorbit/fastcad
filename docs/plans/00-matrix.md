@@ -21,7 +21,7 @@ manifold3d evaluator with dependency-aware caching.
 
 | #  | Item | Issue | parser | eval | faces | diff | kernel | session | ws | agent | tests |
 |----|------|-------|--------|------|-------|------|--------|---------|----|-------|-------|
-| 02 | [.scad-as-spec](./02-stage1-scad-spec.md) | [#2](https://github.com/adi-lumenorbit/fastcad/issues/2) | MISS | MISS | MISS | MISS | PARTIAL | MISS | MISS | MISS | MISS |
+| 02 | [.scad-as-spec](./02-stage1-scad-spec.md) | [#2](https://github.com/adi-lumenorbit/fastcad/issues/2) | OK | OK | OK | OK | OK | OK | OK | OK | OK |
 
 ## Roadmap (filed as issues when scoped)
 

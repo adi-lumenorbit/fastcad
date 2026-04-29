@@ -16,7 +16,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from ..model.ops import ChangeSet
+from ..model.spec_diff import ChangeSet
 from ..session import SessionState
 from .system_prompt import SYSTEM_PROMPT_BASE, system_prompt
 from .tools import TOOL_DEFINITIONS, ToolResult, dispatch

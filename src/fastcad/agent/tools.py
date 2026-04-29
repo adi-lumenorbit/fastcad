@@ -25,10 +25,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from ..model.ops import ChangeSet
 from ..model.scad_eval import EvalError
 from ..model.scad_parser import ScadParseError
-from ..model.spec_diff import diff_and_evaluate
+from ..model.spec_diff import ChangeSet, diff_and_evaluate
 from ..session import SessionState
 
 

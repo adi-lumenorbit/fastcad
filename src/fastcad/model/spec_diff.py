@@ -11,9 +11,8 @@ invalidates only the dependents that actually reference that literal.
 """
 from __future__ import annotations
 
-from typing import Iterable
+from dataclasses import dataclass, field
 
-from .ops import ChangeSet
 from .scad_eval import (
     ModuleEval,
     content_hash_for_top_level,
@@ -21,6 +20,31 @@ from .scad_eval import (
     top_level_node_ids,
 )
 from .scad_parser import Source, parse
+
+
+@dataclass
+class ChangeSet:
+    """What changed in the cache after a set_source. The wire layer
+    turns this into a scene_delta with per-id mesh payloads."""
+
+    added: list[str] = field(default_factory=list)
+    updated: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+
+    def merge(self, other: "ChangeSet") -> None:
+        for nid in other.added:
+            if nid not in self.added:
+                self.added.append(nid)
+        for nid in other.updated:
+            if nid not in self.updated and nid not in self.added:
+                self.updated.append(nid)
+        for nid in other.removed:
+            if nid not in self.removed:
+                self.removed.append(nid)
+            if nid in self.added:
+                self.added.remove(nid)
+            if nid in self.updated:
+                self.updated.remove(nid)
 
 
 def diff_and_evaluate(
@@ -95,4 +119,4 @@ def hashes_match(prev_cache: dict[str, ModuleEval], new_source: str | Source) ->
     return True
 
 
-__all__ = ["diff_and_evaluate", "hashes_match"]
+__all__ = ["ChangeSet", "diff_and_evaluate", "hashes_match"]
