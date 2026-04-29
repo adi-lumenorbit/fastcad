@@ -48,6 +48,135 @@ def difference(a: Manifold, b: Manifold) -> Manifold:
     return a - b
 
 
+def intersection(a: Manifold, b: Manifold) -> Manifold:
+    return a ^ b
+
+
+# ---------------------------------------------------------------------------
+# Sketches → manifolds. Thin wrappers around manifold3d.CrossSection and
+# Manifold.extrude / revolve. The "polygons" argument is a list of contours
+# (each contour is a list of (x, y) tuples). The first contour is the outer
+# boundary (CCW); subsequent contours are holes (CW).
+# ---------------------------------------------------------------------------
+
+
+def _to_cross_section(polygons: Sequence[Sequence[Sequence[float]]]) -> "_m.CrossSection":
+    if not polygons:
+        raise ValueError("at least one polygon contour required")
+    contours = [
+        [(float(p[0]), float(p[1])) for p in contour]
+        for contour in polygons
+    ]
+    for i, c in enumerate(contours):
+        if len(c) < 3:
+            raise ValueError(f"polygon contour {i} has fewer than 3 vertices")
+    return _m.CrossSection(contours)
+
+
+def extrude_polygon(
+    polygons: Sequence[Sequence[Sequence[float]]],
+    height: float,
+    twist_deg: float = 0.0,
+    n_divisions: int = 0,
+    scale_top: Sequence[float] = (1.0, 1.0),
+) -> Manifold:
+    """Linear extrude a 2D polygon (or polygon-with-holes) into 3D.
+
+    `n_divisions` is the number of intermediate cross-sections used when
+    `twist_deg` is non-zero (manifold3d wires this through). With twist=0
+    a single section is enough.
+    """
+    if height <= 0:
+        raise ValueError(f"extrude height must be positive, got {height!r}")
+    cs = _to_cross_section(polygons)
+    return _m.Manifold.extrude(
+        cs,
+        float(height),
+        int(n_divisions),
+        float(twist_deg),
+        (float(scale_top[0]), float(scale_top[1])),
+    )
+
+
+def revolve_polygon(
+    polygons: Sequence[Sequence[Sequence[float]]],
+    segments: int = 64,
+    revolve_deg: float = 360.0,
+) -> Manifold:
+    """Revolve a 2D polygon around the Y axis (manifold3d convention).
+
+    Profiles must lie at x ≥ 0 (negative x produces undefined geometry,
+    matching OpenSCAD's `rotate_extrude`).
+    """
+    cs = _to_cross_section(polygons)
+    return _m.Manifold.revolve(cs, int(segments), float(revolve_deg))
+
+
+def polyhedron_from_mesh(
+    vertices: Sequence[Sequence[float]],
+    faces: Sequence[Sequence[int]],
+) -> Manifold:
+    """Construct a Manifold directly from raw vertex + face data.
+
+    Faces of more than 3 vertices are fan-triangulated. Triangles are
+    expected to be CCW when viewed from outside the solid; manifold3d
+    will surface a `status` warning if the result is not closed.
+    """
+    if not vertices:
+        raise ValueError("polyhedron requires at least one vertex")
+    if not faces:
+        raise ValueError("polyhedron requires at least one face")
+    verts = np.asarray(vertices, dtype=np.float32)
+    if verts.ndim != 2 or verts.shape[1] != 3:
+        raise ValueError(f"polyhedron vertices must be (N, 3), got {verts.shape}")
+    tris: list[tuple[int, int, int]] = []
+    for face in faces:
+        if len(face) < 3:
+            raise ValueError(f"polyhedron face has fewer than 3 vertices: {face!r}")
+        if len(face) == 3:
+            tris.append((int(face[0]), int(face[1]), int(face[2])))
+        else:
+            # Fan triangulation around the first vertex.
+            first = int(face[0])
+            for i in range(1, len(face) - 1):
+                tris.append((first, int(face[i]), int(face[i + 1])))
+    tri_arr = np.asarray(tris, dtype=np.uint32)
+    mesh = _m.Mesh(vert_properties=verts, tri_verts=tri_arr)
+    return _m.Manifold(mesh)
+
+
+def apply_transform(
+    m: Manifold,
+    translate_v: Sequence[float] | None = None,
+    rotate_xyz_deg: Sequence[float] | None = None,
+    scale_v: Sequence[float] | None = None,
+    mirror_axis: str | None = None,
+) -> Manifold:
+    """Compose transforms in the standard CAD order:
+    scale → mirror → rotate → translate.
+
+    Each argument is optional; if all are None the manifold is
+    returned unchanged.
+    """
+    out = m
+    if scale_v is not None:
+        out = out.scale([float(scale_v[0]), float(scale_v[1]), float(scale_v[2])])
+    if mirror_axis is not None:
+        normal = {"x": [1, 0, 0], "y": [0, 1, 0], "z": [0, 0, 1]}.get(mirror_axis.lower())
+        if normal is None:
+            raise ValueError(f"mirror_axis must be one of 'x', 'y', 'z'; got {mirror_axis!r}")
+        out = out.mirror(normal)
+    if rotate_xyz_deg is not None:
+        out = out.rotate(
+            [float(rotate_xyz_deg[0]), float(rotate_xyz_deg[1]), float(rotate_xyz_deg[2])]
+        )
+    if translate_v is not None:
+        out = out.translate(
+            [float(translate_v[0]), float(translate_v[1]), float(translate_v[2])]
+        )
+    return out
+
+
 @dataclass(frozen=True)
 class BBox:
     """Axis-aligned bounding box. Coords in millimeters."""
