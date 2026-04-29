@@ -15,9 +15,8 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from ..agent.client import AgentTurn, run_turn
+from ..agent.client import AgentTurn, _reset_fake, run_turn
 from ..model import kernel as k
-from ..model.scad import render as render_scad
 from ..session import SessionState
 
 
@@ -30,12 +29,14 @@ class WSContext:
 
 
 def _node_payload(ctx: WSContext, node_id: str) -> dict:
-    node = ctx.session.scene.nodes[node_id]
-    bb = k.BBox.from_manifold(node.manifold)
-    mesh = k.to_mesh_dict(node.manifold)
+    me = ctx.session.cache[node_id]
+    bb = me.bbox
+    mesh = k.to_mesh_dict(me.manifold)
     return {
         "id": node_id,
-        "kind": node.kind,
+        # `kind` retained for the frontend's mesh.userData.kind property.
+        # In the spec model the kind is conventionally the module name.
+        "kind": node_id,
         "bbox": {"min": [bb.xmin, bb.ymin, bb.zmin], "max": [bb.xmax, bb.ymax, bb.zmax]},
         "mesh": mesh,
     }
@@ -44,15 +45,15 @@ def _node_payload(ctx: WSContext, node_id: str) -> dict:
 def _scene_init(ctx: WSContext) -> dict:
     return {
         "type": "scene_init",
-        "nodes": [_node_payload(ctx, nid) for nid in ctx.session.scene.order],
+        "nodes": [_node_payload(ctx, nid) for nid in ctx.session.cache.keys()],
     }
 
 
 def _scene_delta(ctx: WSContext, added: list[str], updated: list[str], removed: list[str]) -> dict:
     return {
         "type": "scene_delta",
-        "added": [_node_payload(ctx, nid) for nid in added if nid in ctx.session.scene.nodes],
-        "updated": [_node_payload(ctx, nid) for nid in updated if nid in ctx.session.scene.nodes],
+        "added": [_node_payload(ctx, nid) for nid in added if nid in ctx.session.cache],
+        "updated": [_node_payload(ctx, nid) for nid in updated if nid in ctx.session.cache],
         "removed": removed,
     }
 
@@ -149,13 +150,14 @@ async def _dispatch(ws: WebSocket, ctx: WSContext, msg: dict[str, Any]) -> None:
         return
     if typ == "reset":
         ctx.session.reset()
+        _reset_fake(ctx.session)
         ctx.transcript.clear()
         ctx.pending_ask = None
         await _send(ws, ctx, _scene_init(ctx))
         return
     if typ == "export_scad":
-        src = render_scad(ctx.session.log[: ctx.session.head])
-        await _send(ws, ctx, {"type": "scad", "source": src})
+        # The spec source IS the export — no translation layer.
+        await _send(ws, ctx, {"type": "scad", "source": ctx.session.current_source})
         return
     if typ == "ws_log_request":
         await _send(ws, ctx, {"type": "ws_log", "log": list(ctx.ws_log[-200:])})

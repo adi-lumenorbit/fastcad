@@ -47,8 +47,10 @@ def test_ws_prompt_creates_cube_and_emits_delta(client: TestClient):
         ws.send_text(json.dumps({"type": "prompt", "text": "Make a 20mm cube"}))
         delta = _drain_until(ws, "scene_delta")
         assert len(delta["added"]) == 1
-        assert delta["added"][0]["kind"] == "cube"
-        # Mesh transport carries vertex+triangle counts
+        # Under the .scad-spec model, the agent wraps the cube in a
+        # named module; the node id is the module name.
+        assert delta["added"][0]["id"] == "cube_1"
+        # Mesh transport carries vertex+triangle counts.
         mesh = delta["added"][0]["mesh"]
         assert mesh["vertex_count"] == 8
         assert mesh["triangle_count"] == 12
@@ -90,5 +92,8 @@ def test_ws_export_scad(client: TestClient):
         _drain_until(ws, "scene_delta")
         ws.send_text(json.dumps({"type": "export_scad"}))
         scad = _drain_until(ws, "scad")
-        assert "fastcad_scene()" in scad["source"]
-        assert "cube(size=[20, 20, 20])" in scad["source"]
+        # The export IS the spec source — raw .scad with the agent's
+        # module names — no translation layer.
+        assert "module cube_1" in scad["source"]
+        assert "cube([20, 20, 20])" in scad["source"]
+        assert "cube_1();" in scad["source"]

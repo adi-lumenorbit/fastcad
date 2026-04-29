@@ -1,87 +1,106 @@
-"""Tool schemas + dispatch.
+"""Agent tool schemas + dispatch.
 
-Each tool returns a `ToolResult` with `content` (string surfaced to the LLM
-as the tool_result) and an optional `ChangeSet` produced by mutating the
-session. `ask_user` is special: it pauses the agent loop and surfaces a
-clarification request to the UI; the next user turn resumes the loop.
+Stage 1 collapses the previous flat-CSG tool set into a single primary
+tool: `set_source(text)`. The agent rewrites the entire `.scad` spec
+each turn; the system handles incremental rendering by AST-diff against
+the previous source.
+
+Tools:
+
+- `read_source` — return the current `.scad`. Rarely needed; the spec
+  is in the system prompt every turn.
+- `set_source(text)` — replace the spec. Parses + evaluates; on parse
+  or eval error, returns the error message verbatim so the agent can
+  self-correct on the next turn (no mutation occurs).
+- `validate(text)` — dry-run a candidate source. Same parse + eval
+  pipeline, but no mutation regardless of outcome. Used by the agent
+  to self-check a tricky rewrite before committing.
+- `select_face(node_id, face_name)` — return `{point, normal}` for a
+  named face on a top-level module call. Helps the agent place a
+  follow-up part on a face semantically rather than via bbox guessing.
+- `ask_user(question, options)` — pause for clarification.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 
-from ..model.ops import AddPrimitive, Boolean, ChangeSet
+from ..model.ops import ChangeSet
+from ..model.scad_eval import EvalError
+from ..model.scad_parser import ScadParseError
+from ..model.spec_diff import diff_and_evaluate
 from ..session import SessionState
 
 
 TOOL_DEFINITIONS: list[dict] = [
     {
-        "name": "list_scene",
+        "name": "read_source",
         "description": (
-            "Return all current nodes with id, kind, bbox, center, size. "
-            "Call this whenever the user's prompt references existing geometry."
+            "Return the current `.scad` spec source. The spec is also "
+            "embedded in the system prompt every turn, so calling this "
+            "is rarely needed."
         ),
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
-        "name": "add_primitive",
+        "name": "set_source",
         "description": (
-            "Add a primitive to the scene. Returns the new node's id. "
-            "Anchor places the primitive's *center* at the target's anchor point."
+            "Replace the entire `.scad` spec with the given text. The "
+            "system parses, evaluates, and renders only the modules "
+            "whose dependencies actually changed. On parse / eval error "
+            "the spec is unchanged and the error is returned to you — "
+            "fix the source and call again. This is the primary edit "
+            "tool: any change to the model goes through it."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": ["cube", "sphere", "cylinder"]},
-                "params": {
-                    "type": "object",
-                    "description": (
-                        "cube: {size: [x,y,z]}; "
-                        "sphere: {radius, segments?}; "
-                        "cylinder: {height, radius, segments?}"
-                    ),
-                },
-                "anchor_to": {
-                    "type": ["string", "null"],
-                    "description": "Existing node id, or null to place at world origin.",
-                },
-                "anchor": {
+                "text": {
                     "type": "string",
-                    "enum": ["origin", "top", "bottom", "center"],
-                    "default": "origin",
-                },
-                "offset": {
-                    "type": "array",
-                    "items": {"type": "number"},
-                    "minItems": 3,
-                    "maxItems": 3,
-                    "default": [0, 0, 0],
+                    "description": "Full new `.scad` spec source. Replaces the current spec wholesale.",
                 },
             },
-            "required": ["kind", "params"],
+            "required": ["text"],
         },
     },
     {
-        "name": "boolean",
+        "name": "validate",
         "description": (
-            "Apply a CSG boolean. target_id is mutated; with_id is consumed by default."
+            "Dry-run a candidate `.scad` source through the parser + "
+            "evaluator without mutating the spec. Use when you're "
+            "unsure whether a tricky rewrite will parse or evaluate "
+            "cleanly. Returns ok/true or an error message."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": ["union", "difference"]},
-                "target_id": {"type": "string"},
-                "with_id": {"type": "string"},
-                "consume_with": {"type": "boolean", "default": True},
+                "text": {"type": "string"},
             },
-            "required": ["kind", "target_id", "with_id"],
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "select_face",
+        "description": (
+            "Get the `{point, normal}` of a named face on a top-level "
+            "module call. Useful for placing a follow-up part on a "
+            "specific face. Face names: +X, -X, +Y, -Y, +Z, -Z."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "string"},
+                "face_name": {"type": "string", "enum": ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]},
+            },
+            "required": ["node_id", "face_name"],
         },
     },
     {
         "name": "ask_user",
         "description": (
-            "Pause and ask the user to disambiguate. Use only when there are "
-            "multiple plausible targets and you cannot pick deterministically."
+            "Pause and ask the user to disambiguate. Use only when "
+            "there are multiple plausible interpretations and you "
+            "cannot pick deterministically."
         ),
         "input_schema": {
             "type": "object",
@@ -107,43 +126,54 @@ class ToolResult:
 
 
 def dispatch(name: str, args: dict, session: SessionState) -> ToolResult:
-    if name == "list_scene":
-        return ToolResult(content=json.dumps({"nodes": session.scene.describe_for_agent()}))
+    if name == "read_source":
+        return ToolResult(content=json.dumps({"source": session.current_source}))
 
-    if name == "add_primitive":
-        kind = args["kind"]
-        params = args["params"]
-        anchor_to = args.get("anchor_to")
-        anchor = args.get("anchor", "origin")
-        offset_raw = args.get("offset") or [0, 0, 0]
-        offset = (float(offset_raw[0]), float(offset_raw[1]), float(offset_raw[2]))
-        nid = session.fresh_id(kind)
-        op = AddPrimitive(
-            kind=kind,
-            params=params,
-            node_id=nid,
-            anchor_to=anchor_to,
-            anchor=anchor,
-            offset=offset,
-        )
-        cs = session.append(op)
+    if name == "set_source":
+        text = str(args.get("text", ""))
+        try:
+            cs = session.set_source(text)
+        except (ScadParseError, EvalError) as exc:
+            return ToolResult(content=json.dumps({"ok": False, "error": str(exc)}))
         return ToolResult(
-            content=json.dumps({"node_id": nid, "ok": True}),
+            content=json.dumps({
+                "ok": True,
+                "added": list(cs.added),
+                "updated": list(cs.updated),
+                "removed": list(cs.removed),
+            }),
             changes=cs,
         )
 
-    if name == "boolean":
-        op = Boolean(
-            kind=args["kind"],
-            target_id=args["target_id"],
-            with_id=args["with_id"],
-            consume_with=bool(args.get("consume_with", True)),
-        )
-        cs = session.append(op)
-        return ToolResult(
-            content=json.dumps({"target_id": op.target_id, "ok": True}),
-            changes=cs,
-        )
+    if name == "validate":
+        text = str(args.get("text", ""))
+        try:
+            diff_and_evaluate(text, session.cache)
+        except (ScadParseError, EvalError) as exc:
+            return ToolResult(content=json.dumps({"ok": False, "error": str(exc)}))
+        return ToolResult(content=json.dumps({"ok": True}))
+
+    if name == "select_face":
+        node_id = str(args.get("node_id", ""))
+        face_name = str(args.get("face_name", ""))
+        me = session.cache.get(node_id)
+        if me is None:
+            return ToolResult(content=json.dumps({
+                "ok": False,
+                "error": f"unknown node id: {node_id!r}. "
+                         f"Known: {sorted(session.cache.keys())}",
+            }))
+        face = me.faces.get(face_name)
+        if face is None:
+            return ToolResult(content=json.dumps({
+                "ok": False,
+                "error": f"unknown face name: {face_name!r}. Available: {sorted(me.faces.keys())}",
+            }))
+        return ToolResult(content=json.dumps({
+            "ok": True,
+            "point": list(face.point),
+            "normal": list(face.normal),
+        }))
 
     if name == "ask_user":
         return ToolResult(
@@ -152,3 +182,6 @@ def dispatch(name: str, args: dict, session: SessionState) -> ToolResult:
         )
 
     return ToolResult(content=json.dumps({"error": f"unknown tool: {name}"}))
+
+
+__all__ = ["TOOL_DEFINITIONS", "ToolResult", "dispatch"]
