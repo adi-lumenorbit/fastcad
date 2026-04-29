@@ -1,1 +1,9 @@
 tmp/
+.venv/
+__pycache__/
+*.egg-info/
+*.pyc
+node_modules/
+web/vendor/
+.pytest_cache/
+.playwright/
