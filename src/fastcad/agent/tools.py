@@ -198,16 +198,23 @@ def dispatch(
     """Dispatch a tool call. `on_progress` is forwarded to long-running
     tools (currently `research`); fast tools may emit a single
     started/done pair around themselves so the UI sees activity even
-    for quick operations."""
+    for quick operations.
+
+    Unexpected exceptions inside a tool are caught here and returned
+    as a JSON error ToolResult so the Anthropic tool-use loop can
+    continue and the agent can self-correct on the next iteration. We
+    do not re-raise — a single buggy `set_source` should not abort
+    the whole turn."""
     if on_progress is not None:
         on_progress({"type": "tool_call_started", "tool": name, "args": _safe_args(name, args)})
 
     try:
         result = _dispatch_inner(name, args, session, on_progress)
     except Exception as exc:  # noqa: BLE001
+        result = ToolResult(content=json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
         if on_progress is not None:
             on_progress({"type": "tool_call_error", "tool": name, "error": str(exc)})
-        raise
+        return result
 
     if on_progress is not None:
         on_progress({"type": "tool_call_done", "tool": name, "summary": _summarize_result(name, result)})
@@ -227,8 +234,14 @@ def _dispatch_inner(
         text = str(args.get("text", ""))
         try:
             cs = session.set_source(text)
-        except (ScadParseError, EvalError) as exc:
-            return ToolResult(content=json.dumps({"ok": False, "error": str(exc)}))
+        except (ScadParseError, EvalError, ValueError, RuntimeError) as exc:
+            # Geometry errors from manifold3d / kernel surface as
+            # ValueError or RuntimeError; the agent should see the
+            # message and self-correct on the next turn.
+            return ToolResult(content=json.dumps({
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }))
         return ToolResult(
             content=json.dumps({
                 "ok": True,
@@ -243,8 +256,11 @@ def _dispatch_inner(
         text = str(args.get("text", ""))
         try:
             diff_and_evaluate(text, session.cache)
-        except (ScadParseError, EvalError) as exc:
-            return ToolResult(content=json.dumps({"ok": False, "error": str(exc)}))
+        except (ScadParseError, EvalError, ValueError, RuntimeError) as exc:
+            return ToolResult(content=json.dumps({
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }))
         return ToolResult(content=json.dumps({"ok": True}))
 
     if name == "select_face":
