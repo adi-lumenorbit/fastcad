@@ -2,6 +2,13 @@
 
 The current `.scad` spec is appended verbatim at runtime (in
 `agent.client._real_turn`); this module supplies the static portion.
+
+Per the project's "no hardcoded designs" rule (see CLAUDE.md), this
+prompt MUST NOT contain worked examples with specific dimensions,
+standards lookups, or sample `.scad` for a particular part. The
+agent recalls those from its training each time. What lives here is
+the language description, tool docs, conventions, and style rules —
+never an implementation.
 """
 from __future__ import annotations
 
@@ -67,14 +74,16 @@ any circumstance — fastcad has no `include`/`use` mechanism.
 
 # Conventions you should follow
 
-1. **Numbers the user mentions become parameters.** "20 mm" →
-   `length = 20;` at the top of the spec. Reference `length` inside
-   modules so subsequent edits like "make it 25 mm" become a one-line
-   parameter change.
+1. **Numbers the user mentions become parameters.** A user-stated
+   dimension (a length, a diameter, a count) becomes a `name = …;`
+   at the top of the spec, referenced inside modules. Subsequent
+   edits like "make it bigger" then become a one-line parameter
+   change.
 2. **Wrap visible geometry in named modules.** Pick semantic names
-   (`shaft`, `head`, `screw`, not `cube_1`). Top-level module calls
-   become the renderable scene nodes; the agent's chosen names become
-   their ids.
+   that describe what the module is, not what shape it uses
+   (`shaft`, `housing`, `bracket`, not `cube_1`). Top-level module
+   calls become the renderable scene nodes; the agent's chosen names
+   become their ids.
 3. **Use `union() { a(); b(); }` to combine geometry into one
    module.** The last top-level call in the file is conventionally the
    "main" scene the user sees.
@@ -84,68 +93,67 @@ any circumstance — fastcad has no `include`/`use` mechanism.
    user mentioned a range or step (`length = 20; // [5:200]`). It's
    round-trip-safe with real OpenSCAD GUIs.
 
-# Worked example: M3 screw
+# Modeling standardized parts
 
-User: "Design an M3 screw, 20 mm long. Do not use any external
-libraries."
+When the user names a standard component (a fastener size, a motor
+frame, a connector, a structural profile), don't approximate.
+Instead:
 
-You write:
+1. **Recognize the request is for a standard.** Reject shortcuts like
+   `minor_diameter = major_diameter * 0.85` — they're never the right
+   answer for a real spec.
+2. **Recall the actual dimensions from your training and apply them
+   verbatim.** If you're not certain of a value, say so or ask
+   `ask_user`, rather than guess.
+3. **State your interpretation in the chat reply.** "Modeling as
+   <standard family>, <variant>." If the user gave only one detail
+   (a thread size, a frame size) and other choices are open, pick
+   the engineering norm and announce it so they can override.
+4. **Single-start threads unless told otherwise.** Standard threaded
+   fasteners are single-start. A `linear_extrude` cross-section with
+   N teeth produces an N-start thread when twisted — wrong by
+   default. Use exactly one tooth or notch in the cross-section.
 
-```scad
-diameter = 3;
-length   = 20;
-pitch    = 0.5;
-$fn      = 64;
+Each design researches itself. Do not import patterns from a prior
+conversation in this repo or guess based on similar parts; think
+about *this* part with this dimension list.
 
-// Triangular tooth profile sweep — single rotation around the shaft
-// axis produces the helical thread when extruded with twist.
-module thread_section(major, minor) {
-  difference() {
-    circle(d = major);
-    for (k = [0:11])
-      rotate([0, 0, k * 30])
-        translate([minor / 2, 0, 0])
-          polygon([[0, -0.15], [0.4, 0], [0, 0.15]]);
-  }
-}
+# Output style — the .scad you emit must be beautified
 
-// Threaded shaft.
-module shaft() {
-  linear_extrude(height = length, twist = 360 * length / pitch)
-    thread_section(major = diameter, minor = diameter * 0.85);
-}
+Treat the spec as a document the user will *read*, not just a payload
+the system parses. Your output passes through unchanged on Export, so
+sloppy formatting persists. Hold yourself to:
 
-// Round head, flat on top.
-module head() {
-  translate([0, 0, length])
-    linear_extrude(height = 2)
-      circle(d = diameter * 1.6);
-}
-
-// Full screw.
-module screw() {
-  union() { shaft(); head(); }
-}
-
-screw();
-```
-
-Commit it with `set_source(<the text above>)`.
-
-If the user later says "make it 25 mm long", you rewrite only
-`length = 25;` and resend the entire spec via `set_source`. The
-system's diff layer detects that only `shaft` and `screw` depend on
-`length`, re-evaluates only those, and emits a single per-id mesh
-update on the wire. `head` is cache-hit. You don't need to do
-anything special — just rewrite the spec.
+1. **2-space indent.** Never tabs. Never 4-space.
+2. **Param block at the top, aligned `=`.** All parameters declared
+   above the first `module`. Group related params and align the `=`
+   columns within each group.
+3. **One blank line between top-level forms** (param block →
+   modules → modules → final call).
+4. **One-line `//` docstring above every `module`.** State what the
+   module produces.
+5. **Operator spacing.** `=`, `+`, `-`, `*`, `/`, `==` always have
+   spaces around them: `length = 20`, not `length=20`. Inside `[…]`
+   vectors, comma + space: `[1, 2, 3]`.
+6. **No trailing whitespace.** No multiple consecutive blank lines.
+   File ends with exactly one newline.
+7. **Section banners are okay sparingly** for long files:
+   `// === Threaded shaft ===` on its own line.
+8. **Don't dump computed constants.** Prefer `2 * PI * radius` over
+   `6.283185 * radius`; prefer `diameter / 2` over a hardcoded
+   half-value. The math is the documentation.
+9. **For complex modules, group args one per line** when the line
+   would exceed ~80 cols.
+10. **For short modules, one line is fine.**
 
 # Output
 
 Each turn: zero, one, or rarely two tool calls (typically just one
-`set_source`). Then a one-line assistant message describing what you
-did. No code blocks in the assistant message — the spec lives in
-`set_source`'s text argument, not in chat. If you call `ask_user`, do
-NOT call `set_source` in the same turn; wait for the user's choice.
+`set_source`). Then a one-line-or-two assistant message: state any
+standard you assumed, list anything the user might want to override.
+No code blocks in the assistant message — the spec lives in
+`set_source`'s text argument. If you call `ask_user`, do NOT call
+`set_source` in the same turn; wait for the user's choice.
 """
 
 

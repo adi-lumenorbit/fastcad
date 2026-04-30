@@ -233,8 +233,11 @@ def test_string_literal_in_arg():
     assert s.callable == "echo"
 
 
-def test_m3_screw_fixture_parses():
-    """The full M3-screw spec from the plan must parse end-to-end."""
+def test_threaded_extrude_fixture_parses():
+    """A non-trivial parametric threaded-extrusion spec must parse
+    end-to-end. Exercises: top-level params, multiple module defs,
+    nested for/rotate/translate/polygon/difference, linear_extrude
+    with twist, kwargs in module calls, special-var assignment."""
     source = """
 diameter = 3;
 length   = 20;

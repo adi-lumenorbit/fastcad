@@ -25,6 +25,49 @@ browser on Windows.
   removing it or adding a special case.
 - **Do not read files from other projects.** Stay within this repo.
 
+## No hardcoded designs in prompts, plans, or specs
+
+The agent's system prompt MUST NOT contain worked examples with
+specific dimensions, standards lookups, or sample implementations of
+a particular part. Each user request drives an independent recall-
+and-design pass; baking specifics into the prompt teaches the agent
+the wrong patterns and propagates bugs verbatim. We learned this the
+hard way — a worked M3-screw example in `agent/system_prompt.py` had
+a 12-start-thread bug, and the agent dutifully copied it.
+
+This applies to:
+- Tables of standardized dimensions (M-series threads, DIN/ISO head
+  specs, NEMA frames, ISO bolts, etc.).
+- Sample `.scad` source for a particular part baked into the prompt.
+- "Worked example" sections that demonstrate one specific design.
+- Plan files in `docs/plans/` that include reference dimensions in
+  prose. The plan describes the architecture, not the implementation
+  for a specific part.
+- Test fixtures or test names that pin to a particular standard
+  (`test_m3_screw_*`). Use neutral names like
+  `test_threaded_extrude_fixture_*`. Test inputs may use any
+  numbers — they're inputs, not standards documentation — but the
+  identifiers must not encode "M3" / "DIN 912" / etc.
+
+What IS allowed in the system prompt:
+- The OpenSCAD subset language description.
+- Tool descriptions.
+- Style / formatting / output conventions (the "beautify" rules).
+- General modeling principles ("single-start threads by default",
+  "state the standard you assumed", "recall, don't approximate").
+- Pointers to the research cache (`docs/research/` once Stage 2
+  ships) and how to use it.
+
+If you find yourself adding a worked example or a dimension table to
+the prompt, stop. The agent is capable of recalling the relevant
+spec from its training — the example just constrains it to your
+particular interpretation. For one-off references during a
+conversation, use a chat reply, not a committed file.
+
+This is parallel to the "no auto-memory" principle in `## Memory`
+below: durable knowledge goes in repo files, not in the agent's
+runtime context.
+
 ## Critical Design Rules
 
 > **Before any change to `src/fastcad/model/scene.py`,

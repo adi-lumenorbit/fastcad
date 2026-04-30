@@ -17,17 +17,18 @@ export into one format the agent already speaks fluently: OpenSCAD.
 
 **Try 1 (rejected): more primitives.** Add `extrude_polygon`,
 `revolve_polygon`, `polyhedron`, `transform`. Optimised the symptom
-("M3 screw") not the system. Op log + bbox anchors stay; same
-ceiling.
+(a single complex prompt) not the system. Op log + bbox anchors
+stay; same ceiling.
 
 **Try 2 (rejected as too verbose): JSON spec + patches.**
 Replace the op log with a JSON `Spec` — params + named features +
 `@ref`s — that the agent edits via `apply_patch`. The model becomes
 declarative, edits become first-class, identity becomes semantic.
 The core insight is right but the *encoding* is wrong: JSON is a
-wire format, not a thinking format. Six features in M3-screw → ~30
-lines of `{"name", "kind", "args", "@ref"}` ceremony for what
-should be three lines of CAD code.
+wire format, not a thinking format. A handful of features in any
+non-trivial design balloon to dozens of lines of `{"name", "kind",
+"args", "@ref"}` ceremony for what should be a few lines of CAD
+code.
 
 **Try 3 (this plan): the spec is `.scad` source.** Same insight as
 try 2 — declarative model, agent rewrites it, system re-derives —
@@ -51,50 +52,21 @@ each turn. The user prompts; the agent responds with `set_source(<new
 re-evaluates only modules whose definitions or transitive dependencies
 changed, sends a `scene_delta` for affected nodes.
 
-For "Design an M3 screw, 20 mm long":
+A typical spec looks like a hand-written `.scad` document: a small
+parameter block at the top, a few named modules describing parts of
+the design, and one top-level call assembling them. Per the project's
+"no hardcoded designs" rule (see `CLAUDE.md`), this plan deliberately
+does **not** bake in a worked example for any specific standardized
+part — the agent recalls those from its training each time.
 
-```scad
-// fastcad spec — one file, no external libraries.
-diameter = 3;
-length   = 20;
-pitch    = 0.5;
-$fn      = 64;
+For an edit like "make it bigger" the agent rewrites a single param
+in the spec and resends. The AST diff sees only the changed literal;
+modules that don't depend on that param cache-hit and aren't
+re-evaluated.
 
-module thread_section(major, minor) {
-  difference() {
-    circle(d = major);
-    for (k = [0:11])
-      rotate([0, 0, k * 30])
-        translate([minor / 2, 0, 0])
-          polygon([[0, -0.15], [0.4, 0], [0, 0.15]]);
-  }
-}
-
-module shaft() {
-  linear_extrude(height = length, twist = 360 * length / pitch)
-    thread_section(major = diameter, minor = diameter * 0.85);
-}
-
-module head() {
-  translate([0, 0, length])
-    linear_extrude(height = 2)
-      circle(d = diameter * 1.6);
-}
-
-module screw() {
-  union() { shaft(); head(); }
-}
-
-screw();
-```
-
-For "Make it 25 mm long" the agent rewrites `length = 25;` and
-resends. AST diff sees only that literal changed; `shaft` and `screw`
-invalidate, `head` cache-hits.
-
-For "Add a sphere on top of the head" the agent extends the source
-with a `head_sphere` module + updated `screw` union. No JSON, no
-patches.
+For an addition like "put a feature on top of X" the agent extends
+the source with a new module and updates the assembling top-level
+call. No JSON, no patches — just OpenSCAD.
 
 ## Metadata strategy — "stay a `.scad`"
 
@@ -222,10 +194,12 @@ Wire format unchanged.
 `select_face`, `ask_user`. `add_primitive` / `boolean` / `list_scene`
 removed.
 
-`agent/system_prompt.py` rewritten: documents the subset, includes a
-worked M3-screw example, embeds the current source verbatim every
-turn. Editing rule: "rewrite the whole `.scad` with your change
-applied; the system handles incremental rendering."
+`agent/system_prompt.py` rewritten: documents the subset, lists the
+language conventions and the output style guide, embeds the current
+source verbatim every turn. Per the `CLAUDE.md` "no hardcoded
+designs" rule, the prompt does **not** contain a worked example for
+any specific part. Editing rule: "rewrite the whole `.scad` with your
+change applied; the system handles incremental rendering."
 
 `agent/client.py`: real mode renders source into the system prompt
 before each `messages.create`; fake mode's regex matchers emit
@@ -233,7 +207,8 @@ before each `messages.create`; fake mode's regex matchers emit
 
 ### Naming convention for transport
 
-- Top-level module call → node id == module name (`screw(); → "screw"`).
+- Top-level module call → node id == module name (e.g. a top-level
+  call to `module foo() {…}` becomes node id `"foo"`).
 - Anonymous top-level expression → synthetic id `_top_<n>`.
 - Agent best practice (per system prompt): always wrap visible
   geometry in a named module and call it at the bottom.
@@ -253,7 +228,9 @@ before each `messages.create`; fake mode's regex matchers emit
 5. ChangeSet → `ws.py`, builds `_node_payload(ctx, nid)` from cache,
    emits `scene_delta`.
 
-For the screw → 25 mm edit: ~10 ms total; `head` cache-hits.
+For a typical "edit one parameter" change: ~10 ms total. Modules
+that don't reference the edited parameter cache-hit and aren't
+re-evaluated.
 
 ## Existing functions to reuse
 
@@ -269,10 +246,12 @@ For the screw → 25 mm edit: ~10 ms total; `head` cache-hits.
 
 ### Unit (`.venv/bin/pytest tests/unit -q`)
 
-- `test_scad_parser.py` — round-trip on 6 fixtures (M3 screw, hex
-  bracket, vase via rotate_extrude, polyhedron tetra, nested
-  booleans, `for/if/let`). Error cases: missing semicolons,
-  unsupported keyword, unknown function.
+- `test_scad_parser.py` — round-trip on a range of fixtures
+  exercising the supported subset (a complex threaded-extrude with
+  twist + nested for/rotate/translate/polygon/difference, a
+  rotate_extrude profile, a polyhedron tetra, nested booleans,
+  `for/if/let`). Error cases: missing semicolons, unsupported
+  keyword, unknown function.
 - `test_scad_eval.py` — fixture sources → expected manifold volumes
   within tolerance; named faces correct; cycle detection rejects
   recursive modules.
@@ -304,12 +283,26 @@ Existing 5 tests rewritten under new pipeline. Plus:
 ANTHROPIC_API_KEY=… bash scripts/dev.sh   # http://localhost:8765/
 ```
 
-1. "Design an M3 screw, 20 mm long. Do not use any external libraries." → visible threads; valid `.scad` export.
-2. "Make it 25 mm long." → single `set_source`; `scene_delta` updates only `shaft` + `screw`; `head` cache-hits.
-3. "Add a sphere on top of the head." → `select_face("head", "+Z")` → updated source with `head_sphere` module; sphere on the head's top face.
-4. "Make the head hexagonal." → agent rewrites `head` body; only `head` + `screw` invalidate.
+Pick any standardized part the user might ask for ("a threaded
+fastener of your choice", "a hex bracket", "a stepper-motor
+mount") and walk through:
 
-Test 4 is the most important — it's the edit no flat-CSG model
+1. **Initial design** — agent calls `set_source` once; the result
+   is a valid `.scad` export that opens in real OpenSCAD.
+2. **Resize a parameter** ("make it longer") — single `set_source`;
+   the resulting `scene_delta` only updates the modules that
+   actually depend on the edited parameter. Modules that don't
+   reference it cache-hit.
+3. **Add a feature on top of an existing part** — agent uses
+   `select_face("<existing_module>", "+Z")` and emits a new module
+   plus an updated assembling top-level call; the new feature
+   lands on the chosen face.
+4. **Replace one module's geometry** ("make it hexagonal instead of
+   round") — agent rewrites only that module's body; only that
+   module and any modules unioning it invalidate; siblings
+   cache-hit.
+
+Test (4) is the most important — it's the edit no flat-CSG model
 handles cleanly.
 
 ## Push / merge instructions
@@ -345,8 +338,9 @@ handles cleanly.
 Estimate ~14–18 hours focused work. Descope choices:
 
 - **A. Constrained-syntax minimum.** Drop `for / if / let / ?:` and
-  function-calls in v1. ~10–12 hrs. Not recommended (M3 screw needs
-  computed thread vertices).
+  function-calls in v1. ~10–12 hrs. Not recommended — any non-
+  trivial parametric design (helical threads, gear teeth, repeated
+  patterns) needs computed values that require these constructs.
 - **B. Stage 1a — parser + evaluator only, no caching.** Always
   full-re-evaluate on `set_source`. ~10–12 hrs. Spec / export / agent
   UX still right. Reasonable if shipping fast matters.

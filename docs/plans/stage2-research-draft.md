@@ -7,17 +7,18 @@
 
 ## Context
 
-Stage 1 (PR #3) shipped the `.scad`-as-spec architecture and produced
-its first M3-screw output. Two problems surfaced:
+Stage 1 (PR #3) shipped the `.scad`-as-spec architecture and put a
+real-Claude turn through its paces on a standardized-part prompt.
+Two problems surfaced:
 
-1. **Wrong geometry.** The screw the agent rendered isn't standards-
+1. **Wrong geometry.** The part the agent rendered wasn't standards-
    compliant — multi-start thread instead of single, wrong minor
    diameter, invented head proportions. Root cause: a worked example
-   was baked into the system prompt, and the agent dutifully copied
-   its bugs. Implementations belong in the agent's per-turn
-   reasoning, **not** in the prompt or any committed reference. The
-   agent's job is to look up the right spec from its training each
-   time.
+   for a specific standardized part had been baked into the system
+   prompt, and the agent dutifully copied its bugs verbatim.
+   Implementations belong in the agent's per-turn reasoning, **not**
+   in the prompt or any committed reference. The agent's job is to
+   recall the right spec from its training each time.
 
 2. **No domain research, no progress visibility, no memory.** When
    the agent does need to look up a standard, it has no way to
@@ -45,8 +46,8 @@ Verification:
 ```
 .venv/bin/pytest tests/unit -q
 bash scripts/e2e.sh
-grep -rin "DIN 912\|ISO 4762\|thread_section\|thread_xs" \
-  src tests docs CLAUDE.md   # only renamed identifiers should match
+grep -rin "<standardized-part-keyword>\|<DIN/ISO ref>" \
+  src tests docs CLAUDE.md   # nothing standard-specific should remain
 ```
 
 Manual real-Claude smoke (post-cleanup):

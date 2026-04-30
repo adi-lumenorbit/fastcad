@@ -269,10 +269,10 @@ cube([big ? 10 : 1, 1, 1]);
     assert out["cube"].bbox.xmax == pytest.approx(10.0)
 
 
-# ---- m3 screw fixture parses + evaluates ----------------------------------
+# ---- threaded-extrude fixture: parser + evaluator end-to-end --------------
 
 
-M3_SCREW_SRC = """
+THREADED_EXTRUDE_SRC = """
 diameter = 3;
 length   = 20;
 pitch    = 0.5;
@@ -307,12 +307,14 @@ screw();
 """
 
 
-def test_m3_screw_evaluates_to_one_node():
-    out = _eval(M3_SCREW_SRC)
+def test_threaded_extrude_evaluates_to_one_node():
+    """A non-trivial extrude+twist composition evaluates to a single
+    top-level node whose total Z-extent is shaft length + head height."""
+    out = _eval(THREADED_EXTRUDE_SRC)
     assert list(out.keys()) == ["screw"]
     me = out["screw"]
     bb = me.bbox
-    # Total height = shaft 20 + head 2 = 22.
+    # Total height = shaft length 20 + head height 2 = 22.
     assert (bb.zmax - bb.zmin) == pytest.approx(22.0, abs=0.5)
 
 
