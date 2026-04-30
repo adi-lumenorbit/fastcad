@@ -44,13 +44,12 @@ tool errors so the agent self-corrects in the same turn.
 
 | #  | Item | Issue | validate | render | critic | cache schema | tools | tests |
 |----|------|-------|----------|--------|--------|--------------|-------|-------|
-| 06 | [adversarial validation](./06-stage3-validation.md) | [#6](https://github.com/adi-lumenorbit/fastcad/issues/6) | OK | MISS | MISS | OK | OK | OK |
+| 06 | [adversarial validation](./06-stage3-validation.md) | [#6](https://github.com/adi-lumenorbit/fastcad/issues/6) | OK | OK | OK | OK | OK | OK |
 
-Channel 1 (structural) + cache schema + auto-validate + UI shipped in
-PR #7. Channel 2 (render + vision critic) deferred to a follow-up
-issue: the structural channel alone catches the regression class
-that motivated Stage 3 (multi-start threads, missing modules,
-out-of-spec dimensions).
+Channels 1 (structural) and 2 (render + vision critic) shipped in
+PR #7. Vision rendering uses the OpenSCAD CLI (`openscad -o out.png
+--camera ...`) — no `pyrender` / EGL dependency. The vision pass
+runs after Channel 1 passes, when `FASTCAD_AUTO_VALIDATE=structural+vision`.
 
 ## Roadmap (filed as issues when scoped)
 

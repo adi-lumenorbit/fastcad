@@ -43,11 +43,23 @@ This applies to:
 - Plan files in `docs/plans/` that include reference dimensions in
   prose. The plan describes the architecture, not the implementation
   for a specific part.
-- Test fixtures or test names that pin to a particular standard
-  (`test_m3_screw_*`). Use neutral names like
-  `test_threaded_extrude_fixture_*`. Test inputs may use any
-  numbers — they're inputs, not standards documentation — but the
-  identifiers must not encode "M3" / "DIN 912" / etc.
+- Test fixtures or test names that pin to a particular standard.
+  Use neutral names like `test_threaded_extrude_fixture_*`. **Both
+  the identifier *and* the fixture content matter**: if the test
+  body recapitulates a specific standard ("here's an M3 spec, here's
+  the matching .scad, assert they line up"), that's the same risk
+  as a worked example in the prompt — the implementation pattern
+  ends up reinforced via the agent's training/eval feedback loop
+  and overfits to that one part. Test inputs may use any numbers
+  (they're just numbers), but neither the identifier nor the
+  fixture's structural content should encode a specific standard.
+
+  Why this matters: the agent reads its own past output through the
+  test corpus when iterating on prompts/system messages. A test
+  asserting "for M3 the answer is X" steers the agent toward X for
+  M3 specifically, even when the architectural intent was "for any
+  standardized fastener, the validator catches Y." Overfitting at
+  the prompt level breaks generalization.
 
 What IS allowed in the system prompt:
 - The OpenSCAD subset language description.

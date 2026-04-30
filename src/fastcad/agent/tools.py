@@ -407,20 +407,29 @@ def _run_structural_validation(
     session: SessionState,
     slug: str,
     on_progress: ProgressCallback | None,
+    *,
+    user_prompt: str | None = None,
+    run_vision: bool | None = None,
 ) -> list[Defect] | None:
-    """Channel 1 entry point. Returns None when the cache entry
-    doesn't exist (caller surfaces as 'unknown slug' error). Returns
-    a (possibly empty) list of Defect when the cache entry was
-    parseable; defects also stream as `validation_defect` progress
-    events for the UI panel."""
+    """Run validation channels against the current spec.
+
+    Returns None when the cache entry doesn't exist (caller surfaces
+    as 'unknown slug' error). Returns a (possibly empty) list of
+    Defect otherwise; defects also stream as `validation_defect`
+    progress events for the UI panel.
+
+    Channel 1 (structural) always runs. Channel 2 (vision critic)
+    runs when `run_vision=True` (default: pull from
+    FASTCAD_AUTO_VALIDATE env var) AND Channel 1 produced no errors
+    — there's no point asking a vision model to find subtle issues
+    on geometry that already failed a basic dimension check.
+    """
     cache_md = _research.read_research(slug)
     if cache_md is None:
         return None
     try:
         ast = _parse_source(session.current_source)
     except ScadParseError as exc:
-        # Source on disk doesn't parse — extremely unusual since
-        # set_source validated it, but be defensive.
         return [Defect(
             severity="error",
             where="parse_current_source",
@@ -447,6 +456,7 @@ def _run_structural_validation(
             actual=f"{type(exc).__name__}: {exc}",
             hint="Internal validator error; structural defects may have been missed.",
         )]
+
     if on_progress is not None:
         for d in defects:
             on_progress({
@@ -457,9 +467,38 @@ def _run_structural_validation(
                 "actual": d.actual,
                 "hint": d.hint,
                 "slug": slug,
+                "channel": "structural",
             })
-        if not defects:
-            on_progress({"type": "validation_pass", "slug": slug})
+
+    # Channel 2 — vision critic. Only when configured AND Channel 1
+    # passed. Aborts early if structural checks already errored;
+    # asking a vision model to find subtle issues on a model that
+    # already fails a bbox check just wastes API tokens.
+    if run_vision is None:
+        run_vision = "vision" in os.environ.get("FASTCAD_AUTO_VALIDATE", "")
+    has_errors = any(d.severity == "error" for d in defects)
+    if run_vision and not has_errors:
+        from . import critic as _critic
+        primary = max(
+            (me for me in session.cache.values() if me.manifold is not None),
+            key=lambda me: float(me.manifold.volume()),
+            default=None,
+        )
+        if primary is not None and primary.bbox is not None:
+            bb = primary.bbox
+            bbox = (bb.xmin, bb.ymin, bb.zmin, bb.xmax, bb.ymax, bb.zmax)
+            vision_defects = _critic.review(
+                session.current_source,
+                cache_md,
+                user_prompt or "",
+                bbox,
+                on_progress=on_progress,
+                persist_slug=slug,
+            )
+            defects.extend(vision_defects)
+
+    if on_progress is not None and not defects:
+        on_progress({"type": "validation_pass", "slug": slug})
     return defects
 
 
