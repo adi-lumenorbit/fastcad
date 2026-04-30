@@ -63,6 +63,12 @@ socket head cap screw, M-series">
 - <url 1>
 - <url 2>
 - ...
+
+## Acceptance
+
+```json
+{ … structural validator schema … }
+```
 ```
 
 Notes:
@@ -77,6 +83,52 @@ Notes:
   could guess what the file is about from its filename. Examples:
   `m3-iso4762-socket-cap`, `nema-17-stepper`,
   `iso-7045-pan-head-phillips`.
+
+## Acceptance schema (Stage 3 validator)
+
+The `## Acceptance` section is required for new entries. Older
+entries that lack it opt out of automatic validation gracefully.
+The block is a JSON object the structural validator runs against
+the agent's modeled geometry after every `set_source`. Any defect
+becomes a tool error so the agent self-corrects in the same turn.
+
+```json
+{
+  "bbox_z_extent": [<min>, <max>],
+  "bbox_xy_max":   [<min>, <max>],
+  "volume_range":  [<min>, <max>],
+  "connected_components": <int>,
+  "expected_modules": ["<regex-fragment>", "..."],
+  "horizontal_slices_at_z": [
+    {"z": <mm>, "outer_protrusions": <int>, "radius_range": [<min>, <max>]}
+  ]
+}
+```
+
+Field meanings:
+
+- **bbox_z_extent** — axial extent of the primary geometry (mm).
+- **bbox_xy_max** — `max(x_extent, y_extent)` of the primary
+  geometry (mm). For a fastener, this is typically the head Ø.
+- **volume_range** — total volume in mm³.
+- **connected_components** — should be `1` for a single fastener.
+  More than one means the parts weren't union'd; that's a
+  construction bug.
+- **expected_modules** — each entry is a regex fragment; at least
+  one defined module's name must match. Catches the agent forgetting
+  a feature (no `head|cap` module → fail).
+- **horizontal_slices_at_z** — at each Z height, slice the manifold
+  and verify the cross-section's radial topology:
+  - `outer_protrusions` — count of radial peaks. **A single-start
+    thread = 1; a smooth cylinder = 0; a 12-start thread = 12.**
+    This is the structural check that catches the multi-start-
+    thread bugs.
+  - `radius_range` — optional `[min, max]` mm; the slice's radial
+    extent must overlap.
+
+Use generous tolerances: ±5% on dimensions, ±15% on volume.
+Manifold tessellation introduces small numerical noise; tight
+tolerances produce false-failures.
 
 ## What does NOT belong here
 

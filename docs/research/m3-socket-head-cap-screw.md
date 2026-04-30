@@ -74,3 +74,41 @@ unthreaded shank of length (l − b).
 - https://www.engineersedge.com/iso_socket_head_screw.htm
 - https://torqbolt.com/iso-4762-socket-head-cap-screws-dimensions-standards-specifications
 - https://en.wikipedia.org/wiki/ISO_metric_screw_thread
+
+## Acceptance
+
+Schema for the structural validator. Tolerances are generous:
+manifold tessellation noise + the agent's choice of how to model
+the thread (linear_extrude with twist vs. swept polyhedron) shifts
+the numbers a few percent. Sized for an M3 × 20 cap screw.
+
+```json
+{
+  "bbox_z_extent": [22.0, 23.5],
+  "bbox_xy_max": [5.30, 5.65],
+  "volume_range": [120, 230],
+  "connected_components": 1,
+  "expected_modules": [
+    "shaft|thread",
+    "head|cap"
+  ],
+  "horizontal_slices_at_z": [
+    {"z": 5.0,  "outer_protrusions": 1, "radius_range": [1.10, 1.55]},
+    {"z": 10.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]},
+    {"z": 15.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]}
+  ]
+}
+```
+
+Notes:
+- **bbox_z_extent** = 20mm shaft + 3mm head ± slack for placement
+  (some agents put the screw tip at z = -1, others at z = 0).
+- **bbox_xy_max** = 5.5mm head Ø, ±5%.
+- **volume_range** is wide because thread-tooth profile choice
+  changes total volume by ~25%; the M3 cap-screw volume should
+  land in [120, 230] mm³ regardless.
+- **outer_protrusions: 1** is the **single-start thread** check.
+  A multi-start thread (the original M3 bug) would fail here on
+  every slice.
+- The slice z values (5, 10, 15) all sit on the threaded portion
+  of an M3 × 20.
