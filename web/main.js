@@ -256,7 +256,7 @@ function handleServerMessage(payload) {
     case "agent_message": addMessage("agent", payload.text); break;
     case "ask_user": showAsk(payload.question, payload.options); break;
     case "tool_log":
-      for (const c of payload.calls) addMessage("tool", `${c.name}(${JSON.stringify(c.args)})`);
+      for (const c of payload.calls) addMessage("tool", `${c.name}(${formatToolArgs(c.args)})`);
       break;
     case "progress": handleProgress(payload); break;
     case "scad": exportScad(payload.source); break;
@@ -284,7 +284,13 @@ function handleProgress(payload) {
     return;
   }
   if (t === "tool_call_done") {
-    finalizeMatching("tool_call", ev.tool, "done", `✓ ${ev.tool}` + summarySuffix(ev.summary));
+    // A tool can complete without raising but still report ok=false
+    // in its summary (parse error, validation defect, etc.). Render
+    // those as error rows (✗ red), not success rows.
+    const failed = ev.summary && ev.summary.ok === false;
+    const cls = failed ? "error" : "done";
+    const icon = failed ? "✗" : "✓";
+    finalizeMatching("tool_call", ev.tool, cls, `${icon} ${ev.tool}` + summarySuffix(ev.summary));
     return;
   }
   if (t === "tool_call_error") {
@@ -387,6 +393,23 @@ function truncate(s, n) {
   if (!s) return "";
   if (s.length <= n) return s;
   return s.slice(0, n - 1) + "…";
+}
+
+function formatToolArgs(args) {
+  // Single-line JSON for short args; for any string field longer than
+  // 120 chars (typically `set_source.text` or `validate.text` dumping
+  // the entire .scad), substitute `<N chars>` so the chat-log stays
+  // scrollable. Mirrors the agent-tools _safe_args truncation.
+  if (!args || typeof args !== "object") return JSON.stringify(args);
+  const trimmed = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (typeof v === "string" && v.length > 120) {
+      trimmed[k] = `<${v.length} chars>`;
+    } else {
+      trimmed[k] = v;
+    }
+  }
+  return JSON.stringify(trimmed);
 }
 
 if (progressClearBtn) {

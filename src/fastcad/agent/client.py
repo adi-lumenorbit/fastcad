@@ -347,7 +347,7 @@ def _real_turn(
 
     client = Anthropic()
     model = os.environ.get("FASTCAD_MODEL", "claude-sonnet-4-6")
-    max_tool_iterations = int(os.environ.get("FASTCAD_MAX_TOOL_ITER", "8"))
+    max_tool_iterations = int(os.environ.get("FASTCAD_MAX_TOOL_ITER", "16"))
 
     messages: list[dict] = []
     for entry in transcript:
