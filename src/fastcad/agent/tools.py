@@ -470,14 +470,17 @@ def _run_structural_validation(
                 "channel": "structural",
             })
 
-    # Channel 2 — vision critic. Only when configured AND Channel 1
-    # passed. Aborts early if structural checks already errored;
-    # asking a vision model to find subtle issues on a model that
-    # already fails a bbox check just wastes API tokens.
+    # Channel 2 — vision critic. Runs whenever configured, even when
+    # Channel 1 reported errors. The original design gated Channel 2
+    # on Channel 1 passing ("don't waste API tokens on failing
+    # geometry") but observed agent behaviour shows Channel 1 errors
+    # alone don't always unstick the agent — the vision critic
+    # offers a different *kind* of feedback ("you're building stacked
+    # rings, not a helix") that complements Channel 1's terse defect
+    # text. The extra ~10s per iteration is worth the convergence.
     if run_vision is None:
         run_vision = "vision" in os.environ.get("FASTCAD_AUTO_VALIDATE", "")
-    has_errors = any(d.severity == "error" for d in defects)
-    if run_vision and not has_errors:
+    if run_vision:
         from . import critic as _critic
         primary = max(
             (me for me in session.cache.values() if me.manifold is not None),

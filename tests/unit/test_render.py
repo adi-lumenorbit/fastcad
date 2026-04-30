@@ -134,8 +134,10 @@ def test_render_camera_string_includes_eye_and_target(tmp_path):
     )
     cam_strs = []
     for cmd in captured["cmds"]:
-        idx = cmd.index("--camera")
-        cam_strs.append(cmd[idx + 1])
+        # cmd line uses the `--camera=...` joined form for OpenSCAD
+        # 2021.01 compatibility.
+        cam_arg = next(a for a in cmd if a.startswith("--camera="))
+        cam_strs.append(cam_arg.split("=", 1)[1])
     # Each camera string is six comma-separated floats.
     for s in cam_strs:
         parts = s.split(",")

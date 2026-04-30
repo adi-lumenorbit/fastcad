@@ -114,13 +114,16 @@ def render_scad_source(
 
         for view in _views_for_bbox(bbox):
             out_png = Path(tmpdir) / f"{view.name}.png"
+            # OpenSCAD 2021.01 doesn't accept `--render` (it prints help
+            # and exits). Newer versions accept it. We use the form that
+            # works in 2021.01 — preview rendering is fine for a vision
+            # critic at this resolution.
             cmd = [
                 bin_path,
                 "-o", str(out_png),
-                "--imgsize", f"{width},{height}",
-                "--camera", _camera_str(view),
-                "--colorscheme", "Tomorrow",
-                "--render",
+                f"--imgsize={width},{height}",
+                f"--camera={_camera_str(view)}",
+                "--colorscheme=Tomorrow",
                 str(scad_path),
             ]
             try:
