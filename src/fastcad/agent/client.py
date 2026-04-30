@@ -15,11 +15,15 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
 from ..model.spec_diff import ChangeSet
 from ..session import SessionState
 from .system_prompt import SYSTEM_PROMPT_BASE, system_prompt
 from .tools import TOOL_DEFINITIONS, ToolResult, dispatch
+
+
+ProgressCallback = Callable[[dict], None]
 
 
 @dataclass
@@ -40,14 +44,15 @@ def run_turn(
     *,
     transcript: list[dict] | None = None,
     pending_ask: dict | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> AgentTurn:
     if transcript is None:
         transcript = []
     transcript.append({"role": "user", "content": user_message})
     if _is_fake():
-        turn = _fake_turn(user_message, session, transcript, pending_ask)
+        turn = _fake_turn(user_message, session, transcript, pending_ask, on_progress)
     else:
-        turn = _real_turn(user_message, session, transcript)
+        turn = _real_turn(user_message, session, transcript, on_progress)
     transcript.append({"role": "assistant", "content": turn.text or ""})
     return turn
 
@@ -190,8 +195,13 @@ def _solid_op_ids(ops: list[dict]) -> list[str]:
     return [op["id"] for op in ops if op["kind"] in ("cube", "sphere", "cylinder")]
 
 
-def _fake_call_set_source(session: SessionState, source: str, turn: AgentTurn) -> None:
-    res = dispatch("set_source", {"text": source}, session)
+def _fake_call_set_source(
+    session: SessionState,
+    source: str,
+    turn: AgentTurn,
+    on_progress: ProgressCallback | None = None,
+) -> None:
+    res = dispatch("set_source", {"text": source}, session, on_progress=on_progress)
     turn.tool_log.append({"name": "set_source", "args": {"text": source}, "content": res.content})
     if res.changes is not None:
         turn.changes.merge(res.changes)
@@ -202,6 +212,7 @@ def _fake_turn(
     session: SessionState,
     transcript: list[dict],
     pending_ask: dict | None,
+    on_progress: ProgressCallback | None = None,
 ) -> AgentTurn:
     text = user_message.strip()
     low = text.lower()
@@ -227,7 +238,7 @@ def _fake_turn(
                 "radius": radius,
                 "anchor_to": chosen_id if anchor == "top" else None,
             })
-            _fake_call_set_source(session, _ops_to_scad(ops), turn)
+            _fake_call_set_source(session, _ops_to_scad(ops), turn, on_progress)
             turn.text = f"placed sphere on {chosen_id}."
             return turn
         turn.text = f"unknown follow-up kind {kind!r}."
@@ -254,7 +265,7 @@ def _fake_turn(
             "diameter": d,
             "through_height": through_h,
         })
-        _fake_call_set_source(session, _ops_to_scad(ops), turn)
+        _fake_call_set_source(session, _ops_to_scad(ops), turn, on_progress)
         turn.text = f"subtracted a {int(d)}mm hole through {target}."
         return turn
 
@@ -265,7 +276,7 @@ def _fake_turn(
         if not candidates:
             n = _next_index(session, "sphere")
             ops.append({"kind": "sphere", "id": f"sphere_{n}", "radius": radius})
-            _fake_call_set_source(session, _ops_to_scad(ops), turn)
+            _fake_call_set_source(session, _ops_to_scad(ops), turn, on_progress)
             turn.text = "added a sphere (no target to anchor to)."
             return turn
         if len(candidates) == 1:
@@ -276,7 +287,7 @@ def _fake_turn(
                 "radius": radius,
                 "anchor_to": candidates[0],
             })
-            _fake_call_set_source(session, _ops_to_scad(ops), turn)
+            _fake_call_set_source(session, _ops_to_scad(ops), turn, on_progress)
             turn.text = f"placed sphere on top of {candidates[0]}."
             return turn
         # Multiple candidates → ask_user.
@@ -295,7 +306,7 @@ def _fake_turn(
         r = float(r_match.group(1)) if r_match else 5.0
         n = _next_index(session, "cylinder")
         ops.append({"kind": "cylinder", "id": f"cylinder_{n}", "height": h, "radius": r})
-        _fake_call_set_source(session, _ops_to_scad(ops), turn)
+        _fake_call_set_source(session, _ops_to_scad(ops), turn, on_progress)
         turn.text = f"added a {int(h)}mm cylinder."
         return turn
 
@@ -304,7 +315,7 @@ def _fake_turn(
         radius = _extract_mm(low, 10.0) / 2.0
         n = _next_index(session, "sphere")
         ops.append({"kind": "sphere", "id": f"sphere_{n}", "radius": radius})
-        _fake_call_set_source(session, _ops_to_scad(ops), turn)
+        _fake_call_set_source(session, _ops_to_scad(ops), turn, on_progress)
         turn.text = "added a sphere."
         return turn
 
@@ -313,7 +324,7 @@ def _fake_turn(
         size = _extract_mm(low, 20.0)
         n = _next_index(session, "cube")
         ops.append({"kind": "cube", "id": f"cube_{n}", "size": size})
-        _fake_call_set_source(session, _ops_to_scad(ops), turn)
+        _fake_call_set_source(session, _ops_to_scad(ops), turn, on_progress)
         turn.text = f"added a {int(size)}mm cube."
         return turn
 
@@ -330,6 +341,7 @@ def _real_turn(
     user_message: str,
     session: SessionState,
     transcript: list[dict],
+    on_progress: ProgressCallback | None = None,
 ) -> AgentTurn:
     from anthropic import Anthropic  # local import keeps fake-mode lighter
 
@@ -377,7 +389,7 @@ def _real_turn(
         tool_results: list[dict] = []
         ask: dict | None = None
         for tu in tool_uses:
-            result = dispatch(tu["name"], tu["input"], session)
+            result = dispatch(tu["name"], tu["input"], session, on_progress=on_progress)
             turn.tool_log.append(
                 {"name": tu["name"], "args": tu["input"], "content": result.content}
             )

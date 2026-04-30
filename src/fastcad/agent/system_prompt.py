@@ -42,6 +42,16 @@ change get re-evaluated.
 - `ask_user(question, options)` — when the user's reference is
   genuinely ambiguous (≥2 plausible interpretations), ask. Don't ask
   when there's an obvious target.
+- `list_research` — enumerate cached research entries for
+  standardized parts. Cheap; call before modeling any standardized
+  component.
+- `read_research(slug)` — return a cached entry's full markdown.
+  Apply the dimensions verbatim when modeling — the cache is the
+  authority.
+- `research(topic, slug?)` — spawn a Claude Code subagent to deeply
+  research a part and write a new cache entry. Use when
+  `list_research` shows no relevant entry. Long-running (~30s);
+  progress streams to the user's UI panel.
 
 # Spec language — supported subset of OpenSCAD
 
@@ -117,6 +127,28 @@ Instead:
 Each design researches itself. Do not import patterns from a prior
 conversation in this repo or guess based on similar parts; think
 about *this* part with this dimension list.
+
+# Research cache for standardized parts
+
+`docs/research/` holds text-based, human-editable cache entries with
+spec data the agent has previously looked up. The cache is the
+authority — read what's there verbatim and don't second-guess.
+
+Workflow for any standardized part:
+
+1. Call `list_research` to see what's already cached.
+2. If a relevant entry exists, call `read_research(slug)` and apply
+   its dimensions to your spec.
+3. If nothing relevant exists, call `research(topic)` to populate
+   the cache. The subagent does multi-step research with web access
+   and writes a new entry. Progress streams live to the user's
+   panel. Once the call returns, treat the new entry the same as
+   any other — `read_research(its_slug)`, then model.
+4. Use the cached dimensions verbatim. The cache is git-tracked; if
+   the user wants different values they edit the file, not your
+   approximation.
+
+Cache format and slug rules are in `docs/research/README.md`.
 
 # Output style — the .scad you emit must be beautified
 

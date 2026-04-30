@@ -154,3 +154,114 @@ def test_fake_unknown_prompt_returns_help_text():
     turn = run_turn("teach me python", s)
     assert turn.text is not None
     assert s.cache == {}
+
+
+# ---- research tool dispatch -----------------------------------------------
+
+
+def test_dispatch_list_research_empty(tmp_path, monkeypatch):
+    """list_research returns an empty list when no cache entries
+    exist. We point DEFAULT_CACHE_DIR at an empty tmp_path."""
+    from fastcad.agent import research as _research
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+    s = _fresh()
+    res = dispatch("list_research", {}, s)
+    payload = json.loads(res.content)
+    assert payload == {"entries": []}
+
+
+def test_dispatch_list_research_returns_entries(tmp_path, monkeypatch):
+    from fastcad.agent import research as _research
+    (tmp_path / "widget.md").write_text(
+        "# Widget\nresearched: 2026-04-30\nbody\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+    s = _fresh()
+    res = dispatch("list_research", {}, s)
+    payload = json.loads(res.content)
+    assert len(payload["entries"]) == 1
+    assert payload["entries"][0]["slug"] == "widget"
+    assert payload["entries"][0]["title"] == "Widget"
+
+
+def test_dispatch_read_research_present(tmp_path, monkeypatch):
+    from fastcad.agent import research as _research
+    (tmp_path / "thing.md").write_text("# Thing\nbody\n", encoding="utf-8")
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+    s = _fresh()
+    res = dispatch("read_research", {"slug": "thing"}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is True
+    assert "# Thing" in payload["content"]
+
+
+def test_dispatch_read_research_missing(tmp_path, monkeypatch):
+    from fastcad.agent import research as _research
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+    s = _fresh()
+    res = dispatch("read_research", {"slug": "nope"}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is False
+    assert "nope" in payload["error"]
+
+
+def test_dispatch_research_uses_run_research(tmp_path, monkeypatch):
+    """`research` tool delegates to research.run_research and returns
+    its result as the tool content."""
+    from fastcad.agent import research as _research
+
+    captured: dict = {}
+
+    def fake_run_research(topic, slug=None, on_progress=None, **kwargs):
+        captured["topic"] = topic
+        captured["slug"] = slug
+        captured["progress"] = on_progress
+        return _research.ResearchResult(
+            slug=slug or "auto",
+            cache_path="docs/research/auto.md",
+            summary="Auto",
+            cached_hit=False,
+        )
+
+    monkeypatch.setattr(_research, "run_research", fake_run_research)
+    s = _fresh()
+    progress_events = []
+    res = dispatch(
+        "research",
+        {"topic": "test topic", "slug": "test-slug"},
+        s,
+        on_progress=progress_events.append,
+    )
+    payload = json.loads(res.content)
+    assert payload["slug"] == "test-slug"
+    assert payload["cached_hit"] is False
+    assert captured["topic"] == "test topic"
+    assert captured["slug"] == "test-slug"
+    # on_progress must be threaded through.
+    assert captured["progress"] is not None
+
+
+def test_dispatch_emits_progress_around_tool_call():
+    """Every dispatch call emits tool_call_started + tool_call_done
+    progress events when on_progress is provided."""
+    s = _fresh()
+    events = []
+    dispatch("read_source", {}, s, on_progress=events.append)
+    types = [e["type"] for e in events]
+    assert types == ["tool_call_started", "tool_call_done"]
+    assert events[0]["tool"] == "read_source"
+    assert events[1]["tool"] == "read_source"
+
+
+def test_dispatch_set_source_progress_args_truncated():
+    """Long set_source text is summarized in progress events so the
+    WS doesn't ship megabytes per call."""
+    s = _fresh()
+    events = []
+    big_text = "// " + ("x" * 5000) + "\ncube([1,1,1]);"
+    dispatch("set_source", {"text": big_text}, s, on_progress=events.append)
+    started = events[0]
+    assert started["type"] == "tool_call_started"
+    assert "text" in started["args"]
+    assert started["args"]["text"].startswith("<")
+    assert "chars>" in started["args"]["text"]
