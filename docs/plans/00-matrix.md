@@ -34,6 +34,18 @@ new chat-pane panel below the chat log.
 |----|------|-------|----------|-------|----|-----|-------|-------|
 | 04 | [research subsystem](./04-stage2-research.md) | [#4](https://github.com/adi-lumenorbit/fastcad/issues/4) | OK | OK | OK | OK | OK | OK |
 
+## Stage 3 — adversarial design validation
+
+Independent verifier in the loop after `set_source`: cache files gain
+an `## Acceptance` schema for symbolic / structural checks (bbox,
+volume, slice topology, single-start verification), a separate Claude
+Code subagent reviews renders adversarially, and defects flow back as
+tool errors so the agent self-corrects in the same turn.
+
+| #  | Item | Issue | validate | render | critic | cache schema | tools | tests |
+|----|------|-------|----------|--------|--------|--------------|-------|-------|
+| 06 | [adversarial validation](./06-stage3-validation.md) | [#6](https://github.com/adi-lumenorbit/fastcad/issues/6) | MISS | MISS | MISS | MISS | MISS | MISS |
+
 ## Roadmap (filed as issues when scoped)
 
 | Title | Notes |
