@@ -7,3 +7,7 @@ node_modules/
 web/vendor/
 .pytest_cache/
 .playwright/
+
+# Local env (secrets). Track .env.template instead.
+.env
+.env.local
