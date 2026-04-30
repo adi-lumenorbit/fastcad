@@ -44,7 +44,13 @@ tool errors so the agent self-corrects in the same turn.
 
 | #  | Item | Issue | validate | render | critic | cache schema | tools | tests |
 |----|------|-------|----------|--------|--------|--------------|-------|-------|
-| 06 | [adversarial validation](./06-stage3-validation.md) | [#6](https://github.com/adi-lumenorbit/fastcad/issues/6) | MISS | MISS | MISS | MISS | MISS | MISS |
+| 06 | [adversarial validation](./06-stage3-validation.md) | [#6](https://github.com/adi-lumenorbit/fastcad/issues/6) | OK | MISS | MISS | OK | OK | OK |
+
+Channel 1 (structural) + cache schema + auto-validate + UI shipped in
+PR #7. Channel 2 (render + vision critic) deferred to a follow-up
+issue: the structural channel alone catches the regression class
+that motivated Stage 3 (multi-start threads, missing modules,
+out-of-spec dimensions).
 
 ## Roadmap (filed as issues when scoped)
 

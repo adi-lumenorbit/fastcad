@@ -308,6 +308,17 @@ function handleProgress(payload) {
     return;
   }
 
+  if (t === "validation_defect") {
+    const cls = ev.severity === "error" ? "error" : "warning";
+    const text = `${ev.severity === "error" ? "✗" : "⚠"} ${ev.where} — expected ${truncate(ev.expected, 40)}, got ${truncate(ev.actual, 40)}`;
+    appendProgressEntry(cls, text);
+    return;
+  }
+  if (t === "validation_pass") {
+    appendProgressEntry("done", `✓ validation passed (${ev.slug})`);
+    return;
+  }
+
   // Subagent stream chunks: render as nested sub-entries when a research
   // call is currently active; ignore otherwise (the parent tool_call
   // events already cover non-research tools).

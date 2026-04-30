@@ -253,6 +253,131 @@ def test_dispatch_emits_progress_around_tool_call():
     assert events[1]["tool"] == "read_source"
 
 
+def test_dispatch_read_research_sets_last_research_slug(tmp_path, monkeypatch):
+    """read_research records the slug on the session so set_source
+    can auto-validate against it later."""
+    from fastcad.agent import research as _research
+    (tmp_path / "thing.md").write_text("# Thing\nbody\n", encoding="utf-8")
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+    s = _fresh()
+    assert s.last_research_slug is None
+    dispatch("read_research", {"slug": "thing"}, s)
+    assert s.last_research_slug == "thing"
+
+
+CACHE_WITH_ACCEPTANCE = """\
+# Test cube
+
+slug: test-cube
+
+## Acceptance
+
+```json
+{
+  "bbox_z_extent": [9, 11],
+  "bbox_xy_max": [9, 11],
+  "volume_range": [900, 1100],
+  "connected_components": 1,
+  "expected_modules": ["box"],
+  "horizontal_slices_at_z": [
+    {"z": 5, "outer_protrusions": 0}
+  ]
+}
+```
+"""
+
+
+def test_dispatch_validate_design_passes(tmp_path, monkeypatch):
+    """A geometry that matches the cache schema produces ok=true,
+    empty defects."""
+    from fastcad.agent import research as _research
+    (tmp_path / "test-cube.md").write_text(CACHE_WITH_ACCEPTANCE, encoding="utf-8")
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+
+    s = _fresh()
+    s.set_source("module box() { cube([10, 10, 10]); } box();")
+    dispatch("read_research", {"slug": "test-cube"}, s)
+
+    res = dispatch("validate_design", {}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is True
+    assert payload["defects"] == []
+    assert payload["validated_against"] == "test-cube"
+
+
+def test_dispatch_validate_design_reports_defects(tmp_path, monkeypatch):
+    from fastcad.agent import research as _research
+    (tmp_path / "test-cube.md").write_text(CACHE_WITH_ACCEPTANCE, encoding="utf-8")
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+
+    s = _fresh()
+    # Wrong volume — 5×5×5=125, spec wants [900, 1100].
+    s.set_source("module box() { cube([5, 5, 5]); } box();")
+    dispatch("read_research", {"slug": "test-cube"}, s)
+
+    res = dispatch("validate_design", {}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is False
+    assert len(payload["defects"]) > 0
+    assert any(d["where"] == "volume_range" for d in payload["defects"])
+
+
+def test_dispatch_validate_design_no_slug_errors():
+    s = _fresh()
+    res = dispatch("validate_design", {}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is False
+    assert "slug" in payload["error"]
+
+
+def test_dispatch_set_source_auto_validates(tmp_path, monkeypatch):
+    """set_source auto-runs the validator when last_research_slug is
+    set and FASTCAD_AUTO_VALIDATE is on (default)."""
+    from fastcad.agent import research as _research
+    (tmp_path / "test-cube.md").write_text(CACHE_WITH_ACCEPTANCE, encoding="utf-8")
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+    monkeypatch.setenv("FASTCAD_AUTO_VALIDATE", "structural")
+
+    s = _fresh()
+    dispatch("read_research", {"slug": "test-cube"}, s)
+    res = dispatch("set_source", {"text": "module box() { cube([5,5,5]); } box();"}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is True   # spec was committed
+    assert payload["validated_against"] == "test-cube"
+    assert len(payload["defects"]) > 0
+
+
+def test_dispatch_set_source_skips_validation_when_off(tmp_path, monkeypatch):
+    from fastcad.agent import research as _research
+    (tmp_path / "test-cube.md").write_text(CACHE_WITH_ACCEPTANCE, encoding="utf-8")
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+    monkeypatch.setenv("FASTCAD_AUTO_VALIDATE", "off")
+
+    s = _fresh()
+    dispatch("read_research", {"slug": "test-cube"}, s)
+    res = dispatch("set_source", {"text": "module box() { cube([5,5,5]); } box();"}, s)
+    payload = json.loads(res.content)
+    assert "defects" not in payload   # not validated
+
+
+def test_validate_design_emits_progress_events(tmp_path, monkeypatch):
+    from fastcad.agent import research as _research
+    (tmp_path / "test-cube.md").write_text(CACHE_WITH_ACCEPTANCE, encoding="utf-8")
+    monkeypatch.setattr(_research, "DEFAULT_CACHE_DIR", tmp_path)
+
+    s = _fresh()
+    s.set_source("module box() { cube([5, 5, 5]); } box();")
+    dispatch("read_research", {"slug": "test-cube"}, s)
+    events: list[dict] = []
+    dispatch("validate_design", {}, s, on_progress=events.append)
+    types = [e["type"] for e in events]
+    assert "validation_defect" in types
+    # tool_call_started + tool_call_done bracket the validation_defect
+    # events, so they're somewhere in the middle.
+    assert types[0] == "tool_call_started"
+    assert types[-1] == "tool_call_done"
+
+
 def test_dispatch_set_source_progress_args_truncated():
     """Long set_source text is summarized in progress events so the
     WS doesn't ship megabytes per call."""

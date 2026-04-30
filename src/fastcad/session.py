@@ -27,12 +27,17 @@ class SessionState:
     undo_stack: list[str] = field(default_factory=list)
     redo_stack: list[str] = field(default_factory=list)
     cache: dict[str, ModuleEval] = field(default_factory=dict)
+    # Slug of the most recent `read_research` call this turn. Stage 3
+    # validators auto-look-up against it. Cleared on reset; populated
+    # by the read_research dispatch handler.
+    last_research_slug: str | None = None
 
     def reset(self) -> None:
         self.current_source = INITIAL_SOURCE
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.cache.clear()
+        self.last_research_slug = None
 
     def can_undo(self) -> bool:
         return bool(self.undo_stack)

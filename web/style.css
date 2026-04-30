@@ -199,6 +199,10 @@ html, body {
   color: #d77;
 }
 
+.progress-entry.warning {
+  color: #d4a05a;
+}
+
 .progress-entry.sub {
   color: #666;
   padding-left: 14px;

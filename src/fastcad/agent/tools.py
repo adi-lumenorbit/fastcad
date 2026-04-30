@@ -36,9 +36,16 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
+import os
+
 from ..model.scad_eval import EvalError
-from ..model.scad_parser import ScadParseError
+from ..model.scad_parser import ScadParseError, parse as _parse_source
 from ..model.spec_diff import ChangeSet, diff_and_evaluate
+from ..model.validate import (
+    AcceptanceSchemaError,
+    Defect,
+    validate_against_cache,
+)
 from ..session import SessionState
 from . import research as _research
 
@@ -155,6 +162,29 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "validate_design",
+        "description": (
+            "Run the structural validator against the current spec. "
+            "Loads the cache entry's `## Acceptance` schema and "
+            "checks bbox / volume / connected_components / module "
+            "presence / horizontal-slice protrusion topology. Returns "
+            "{ok, defects}. If `against_slug` is omitted, defaults to "
+            "the most recent `read_research` slug this turn. The "
+            "system also auto-invokes this after every successful "
+            "`set_source` when FASTCAD_AUTO_VALIDATE=structural is "
+            "set, so you usually don't need to call it explicitly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "against_slug": {
+                    "type": "string",
+                    "description": "Cache slug to validate against. Defaults to the most-recently-read slug.",
+                },
+            },
+        },
+    },
+    {
         "name": "research",
         "description": (
             "Spawn a Claude Code subagent to research a standardized "
@@ -242,15 +272,33 @@ def _dispatch_inner(
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
             }))
-        return ToolResult(
-            content=json.dumps({
-                "ok": True,
-                "added": list(cs.added),
-                "updated": list(cs.updated),
-                "removed": list(cs.removed),
-            }),
-            changes=cs,
-        )
+
+        # Auto-validate against the most-recent research cache entry.
+        # Defects come back to the agent as part of the success
+        # payload — the spec IS committed (manifold built fine), but
+        # the agent gets the validation gap and can revise on the
+        # next turn. Configurable via FASTCAD_AUTO_VALIDATE.
+        validate_mode = os.environ.get("FASTCAD_AUTO_VALIDATE", "structural")
+        defects: list[dict] = []
+        validated_slug: str | None = None
+        if validate_mode != "off" and session.last_research_slug:
+            d = _run_structural_validation(
+                session, session.last_research_slug, on_progress
+            )
+            if d is not None:
+                defects = [defect.to_dict() for defect in d]
+                validated_slug = session.last_research_slug
+
+        payload: dict[str, object] = {
+            "ok": True,
+            "added": list(cs.added),
+            "updated": list(cs.updated),
+            "removed": list(cs.removed),
+        }
+        if validated_slug is not None:
+            payload["validated_against"] = validated_slug
+            payload["defects"] = defects
+        return ToolResult(content=json.dumps(payload), changes=cs)
 
     if name == "validate":
         text = str(args.get("text", ""))
@@ -313,10 +361,34 @@ def _dispatch_inner(
                 "ok": False,
                 "error": f"unknown slug: {slug!r}",
             }))
+        # Remember the slug so set_source / validate_design can
+        # auto-default to it.
+        session.last_research_slug = slug
         return ToolResult(content=json.dumps({
             "ok": True,
             "slug": slug,
             "content": content,
+        }))
+
+    if name == "validate_design":
+        slug = args.get("against_slug") or session.last_research_slug
+        if not slug:
+            return ToolResult(content=json.dumps({
+                "ok": False,
+                "error": "no cache slug to validate against. "
+                         "Call read_research(slug) first, or pass against_slug.",
+            }))
+        slug = str(slug)
+        defects = _run_structural_validation(session, slug, on_progress)
+        if defects is None:
+            return ToolResult(content=json.dumps({
+                "ok": False,
+                "error": f"unknown slug: {slug!r}",
+            }))
+        return ToolResult(content=json.dumps({
+            "ok": len(defects) == 0,
+            "validated_against": slug,
+            "defects": [d.to_dict() for d in defects],
         }))
 
     if name == "research":
@@ -329,6 +401,66 @@ def _dispatch_inner(
         return ToolResult(content=json.dumps(result.to_dict()))
 
     return ToolResult(content=json.dumps({"error": f"unknown tool: {name}"}))
+
+
+def _run_structural_validation(
+    session: SessionState,
+    slug: str,
+    on_progress: ProgressCallback | None,
+) -> list[Defect] | None:
+    """Channel 1 entry point. Returns None when the cache entry
+    doesn't exist (caller surfaces as 'unknown slug' error). Returns
+    a (possibly empty) list of Defect when the cache entry was
+    parseable; defects also stream as `validation_defect` progress
+    events for the UI panel."""
+    cache_md = _research.read_research(slug)
+    if cache_md is None:
+        return None
+    try:
+        ast = _parse_source(session.current_source)
+    except ScadParseError as exc:
+        # Source on disk doesn't parse — extremely unusual since
+        # set_source validated it, but be defensive.
+        return [Defect(
+            severity="error",
+            where="parse_current_source",
+            expected="parseable .scad",
+            actual=str(exc),
+            hint="Internal: re-parse of the committed source failed.",
+        )]
+    try:
+        defects = validate_against_cache(ast, cache_md, session.cache)
+    except AcceptanceSchemaError as exc:
+        return [Defect(
+            severity="warning",
+            where=f"acceptance_schema:{slug}",
+            expected="parseable Acceptance JSON",
+            actual=str(exc),
+            hint="The cache file's Acceptance section is malformed. "
+                 "Validation skipped.",
+        )]
+    except Exception as exc:  # noqa: BLE001
+        return [Defect(
+            severity="error",
+            where="validator_internal",
+            expected="validation completes",
+            actual=f"{type(exc).__name__}: {exc}",
+            hint="Internal validator error; structural defects may have been missed.",
+        )]
+    if on_progress is not None:
+        for d in defects:
+            on_progress({
+                "type": "validation_defect",
+                "severity": d.severity,
+                "where": d.where,
+                "expected": d.expected,
+                "actual": d.actual,
+                "hint": d.hint,
+                "slug": slug,
+            })
+        if not defects:
+            on_progress({"type": "validation_pass", "slug": slug})
+    return defects
 
 
 def _safe_args(name: str, args: dict) -> dict:
@@ -366,6 +498,12 @@ def _summarize_result(name: str, result: ToolResult) -> dict:
         return {"count": len(payload.get("entries", []))}
     if name == "read_research":
         return {"ok": payload.get("ok"), "slug": payload.get("slug")}
+    if name == "validate_design":
+        return {
+            "ok": payload.get("ok"),
+            "slug": payload.get("validated_against"),
+            "defect_count": len(payload.get("defects") or []),
+        }
     if name == "validate":
         return {"ok": payload.get("ok")}
     if name == "select_face":
