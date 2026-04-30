@@ -235,6 +235,24 @@ include:
   committed, pushed, and (if applicable) merged via PR.
 - **Verification steps**: how to confirm the plan was executed correctly.
 
+### Plan file location — never use `~/.claude/plans/`
+
+NEVER write durable plans to `~/.claude/plans/` (the harness plan-mode
+directory). That directory is per-machine, outside the repo, invisible
+to PR review, and disappears when the harness session ends.
+
+The harness plan-mode file (e.g. `~/.claude/plans/<adjective-noun>.md`)
+is a transient scratch the harness creates when entering plan mode.
+**Treat it as a draft to relocate.** As soon as the plan is meant to
+survive the session — or whenever a user asks to save / share / review
+it — move its content to `docs/plans/<NN>-<slug>.md` (or
+`docs/plans/<slug>-draft.md` if no GitHub issue is filed yet) and
+delete the harness file so there's no parallel copy that can drift.
+
+Same principle as the "no auto-memory" rule below: durable knowledge
+goes in repo files. The harness scratch is a working surface, not a
+home.
+
 ## Issue Workflow
 
 Every issue or work item should have an associated `docs/plans/NN-slug.md`
