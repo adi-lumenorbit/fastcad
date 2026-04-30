@@ -419,6 +419,67 @@ if (progressClearBtn) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Resizable chat-log / progress-pane split. Drag the #pane-divider to
+// rebalance; CSS reads --pane-split (a percentage) on #chat-pane.
+// ---------------------------------------------------------------------------
+
+const paneDivider = document.getElementById("pane-divider");
+const chatPane = document.getElementById("chat-pane");
+
+if (paneDivider && chatPane) {
+  let dragging = false;
+
+  function setSplit(pct) {
+    // Clamp so neither pane disappears entirely.
+    const clamped = Math.max(15, Math.min(85, pct));
+    chatPane.style.setProperty("--pane-split", String(clamped));
+    try {
+      localStorage.setItem("fastcad.paneSplit", String(clamped));
+    } catch (_) { /* private mode etc. — ignore */ }
+  }
+
+  // Restore last drag position across reloads.
+  try {
+    const saved = localStorage.getItem("fastcad.paneSplit");
+    if (saved !== null) setSplit(parseFloat(saved));
+  } catch (_) { /* ignore */ }
+
+  function startDrag(ev) {
+    dragging = true;
+    paneDivider.classList.add("dragging");
+    ev.preventDefault();
+    paneDivider.setPointerCapture(ev.pointerId);
+  }
+
+  function moveDrag(ev) {
+    if (!dragging) return;
+    const rect = chatPane.getBoundingClientRect();
+    const offsetY = ev.clientY - rect.top;
+    const pct = (offsetY / rect.height) * 100;
+    setSplit(pct);
+  }
+
+  function endDrag(ev) {
+    if (!dragging) return;
+    dragging = false;
+    paneDivider.classList.remove("dragging");
+    try { paneDivider.releasePointerCapture(ev.pointerId); } catch (_) { /* ignore */ }
+  }
+
+  paneDivider.addEventListener("pointerdown", startDrag);
+  paneDivider.addEventListener("pointermove", moveDrag);
+  paneDivider.addEventListener("pointerup", endDrag);
+  paneDivider.addEventListener("pointercancel", endDrag);
+
+  // Keyboard accessibility: arrow up/down nudges the split by 5%.
+  paneDivider.addEventListener("keydown", (ev) => {
+    const cur = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split")) || 60;
+    if (ev.key === "ArrowUp") { setSplit(cur - 5); ev.preventDefault(); }
+    else if (ev.key === "ArrowDown") { setSplit(cur + 5); ev.preventDefault(); }
+  });
+}
+
 function exportScad(source) {
   const blob = new Blob([source], { type: "text/plain" });
   const url = URL.createObjectURL(blob);

@@ -259,6 +259,97 @@ def test_slice_outside_bbox_warns():
 # ---------------------------------------------------------------------------
 
 
+def test_xy_symmetric_passes_for_round_geometry():
+    src = "$fn = 64; cylinder(h = 10, r = 5);"
+    ast, ec = _eval_cache(src)
+    md = _cache('{"bbox_xy_symmetric": true}')
+    assert validate_against_cache(ast, md, ec) == []
+
+
+def test_xy_symmetric_fails_for_elliptical_geometry():
+    """An accidental scale([2, 1, 1]) on a cylinder makes x and y
+    extents differ — the validator must catch it."""
+    src = "$fn = 64; scale([2, 1, 1]) cylinder(h = 10, r = 5);"
+    ast, ec = _eval_cache(src)
+    md = _cache('{"bbox_xy_symmetric": true}')
+    defects = validate_against_cache(ast, md, ec)
+    assert any(d.where == "bbox_xy_symmetric" for d in defects)
+
+
+def test_axial_consistency_helical_passes_for_helix():
+    """A real linear_extrude+twist helix has its peak azimuth
+    rotating across z — must pass."""
+    src = """
+        $fn = 64;
+        module thread_xs() {
+          union() {
+            circle(r = 1.0);
+            translate([1.0, 0, 0])
+              polygon([[0, -0.1], [0.3, 0], [0, 0.1]]);
+          }
+        }
+        module helix() {
+          linear_extrude(height = 5, twist = -1800, slices = 256)
+            thread_xs();
+        }
+        helix();
+    """
+    ast, ec = _eval_cache(src)
+    # Pitch is 5mm/360° fraction... twist=-1800 over height=5 means
+    # 1mm per turn. Z values at integer multiples sample the same
+    # azimuth every time — a real helix passing the check needs us
+    # to sample at fractional-pitch offsets.
+    md = _cache(
+        '{"axial_consistency": "helical", "horizontal_slices_at_z": ['
+        '{"z": 1.0,  "outer_protrusions": 1},'
+        '{"z": 1.25, "outer_protrusions": 1},'
+        '{"z": 2.5,  "outer_protrusions": 1},'
+        '{"z": 3.75, "outer_protrusions": 1}'
+        ']}'
+    )
+    defects = validate_against_cache(ast, md, ec)
+    axial = [d for d in defects if d.where == "axial_consistency"]
+    assert axial == []
+
+
+def test_axial_consistency_helical_fails_for_stacked_rings():
+    """Stacked-rings: every horizontal slice has its protrusion at
+    the same azimuth. The agent's geometry from the user's
+    07-57-54.png screenshot is exactly this case (linear_extrude
+    with twist=0, or stacked translate clones)."""
+    src = """
+        $fn = 64;
+        // Each ring is a flat extrude of the same cross-section, no
+        // twist between rings — stacked, not helical.
+        module rings() {
+          union() {
+            for (i = [0:4])
+              translate([0, 0, i * 1.0])
+                linear_extrude(height = 0.5)
+                  union() {
+                    circle(r = 1.0);
+                    translate([1.0, 0, 0]) polygon([[0,-0.1],[0.3,0],[0,0.1]]);
+                  }
+          }
+        }
+        rings();
+    """
+    ast, ec = _eval_cache(src)
+    md = _cache(
+        '{"axial_consistency": "helical", "horizontal_slices_at_z": ['
+        '{"z": 0.25, "outer_protrusions": 1},'
+        '{"z": 1.25, "outer_protrusions": 1},'
+        '{"z": 2.25, "outer_protrusions": 1},'
+        '{"z": 3.25, "outer_protrusions": 1}'
+        ']}'
+    )
+    defects = validate_against_cache(ast, md, ec)
+    axial = [d for d in defects if d.where == "axial_consistency"]
+    assert len(axial) == 1
+    assert axial[0].severity == "error"
+    assert "stacked" in axial[0].actual.lower() or "stacked" in axial[0].hint.lower()
+
+
 def test_cache_without_acceptance_returns_empty():
     src = "cube([5, 5, 5]);"
     ast, ec = _eval_cache(src)

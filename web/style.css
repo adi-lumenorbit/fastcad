@@ -139,16 +139,44 @@ html, body {
   cursor: pointer;
 }
 
+/* Drag handle between chat-log and progress-pane. The JS handler
+   in main.js mutates --pane-split (a percentage 0..100) on chat-pane;
+   chat-log + progress-pane derive their flex-basis from it. */
+#pane-divider {
+  height: 6px;
+  background: #2a2a2a;
+  border-top: 1px solid #1a1a1a;
+  border-bottom: 1px solid #1a1a1a;
+  cursor: row-resize;
+  flex-shrink: 0;
+  user-select: none;
+  transition: background 0.1s;
+}
+
+#pane-divider:hover,
+#pane-divider.dragging {
+  background: #4a4a4a;
+}
+
+#chat-pane {
+  /* Default split: 60% chat-log / 40% progress-pane. Overridden at
+     runtime by JS on drag. */
+  --pane-split: 60;
+}
+
+#chat-log {
+  flex-basis: calc(var(--pane-split, 60) * 1%);
+}
+
 #progress-pane {
   display: flex;
   flex-direction: column;
-  border-top: 1px solid #333;
   background: #181818;
-  /* Independent scroll region: take ~40% of chat-pane and scroll
-     internally. min-height: 0 lets the inner panel actually overflow
-     its parent rather than expanding the parent. */
-  flex: 1 1 40%;
-  min-height: 100px;
+  /* Complement of chat-log's basis so they sum to ~100% of the
+     resizable area. min-height: 0 lets the inner panel overflow
+     internally rather than expanding the parent. */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
 }
 

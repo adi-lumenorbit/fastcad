@@ -125,6 +125,7 @@ def validate_against_cache(
         defects.extend(_check_volume(primary, schema))
         defects.extend(_check_connected_components(primary, schema))
         defects.extend(_check_horizontal_slices(primary, schema))
+        defects.extend(_check_axial_consistency(primary, schema))
     elif eval_cache:
         # cache had nodes but none were 3D — treat as "primary missing"
         defects.append(
@@ -162,13 +163,41 @@ def _check_bbox(primary: ModuleEval, schema: dict) -> list[Defect]:
     bb = primary.bbox
     if bb is None:
         return out
+    x_extent = bb.xmax - bb.xmin
+    y_extent = bb.ymax - bb.ymin
     z_extent = bb.zmax - bb.zmin
-    xy_max = max(bb.xmax - bb.xmin, bb.ymax - bb.ymin)
+    xy_max = max(x_extent, y_extent)
 
     if "bbox_z_extent" in schema:
         out.extend(_check_range("bbox_z_extent", z_extent, schema["bbox_z_extent"], "mm"))
     if "bbox_xy_max" in schema:
         out.extend(_check_range("bbox_xy_max", xy_max, schema["bbox_xy_max"], "mm"))
+
+    # Rotational-symmetry check: x and y extents must be within 5% for
+    # parts that are nominally axisymmetric around Z (fasteners,
+    # cylindrical bosses). Catches accidental scale() in one axis,
+    # non-circular head primitives, and similar.
+    if schema.get("bbox_xy_symmetric"):
+        smaller = max(min(x_extent, y_extent), 1e-9)
+        ratio = max(x_extent, y_extent) / smaller
+        if ratio > 1.05:
+            out.append(
+                Defect(
+                    severity="error",
+                    where="bbox_xy_symmetric",
+                    expected="x_extent ≈ y_extent (within 5%)",
+                    actual=f"x={x_extent:.3f} mm, y={y_extent:.3f} mm, ratio={ratio:.2f}",
+                    hint=(
+                        "The geometry is not rotationally symmetric in the XY "
+                        "plane. For a fastener axisymmetric around Z, x and y "
+                        "extents should be equal. Check for accidental "
+                        "scale([sx, sy, ...]) with sx ≠ sy, an elliptical or "
+                        "non-circular head primitive, or a translated copy "
+                        "that breaks symmetry."
+                    ),
+                )
+            )
+
     return out
 
 
@@ -443,6 +472,98 @@ def _count_outer_protrusions(cs: Any, threshold_factor: float = 1.05) -> int:
         if cur > prev_r and cur >= next_r:
             peaks += 1
     return peaks
+
+
+def _peak_azimuth(cs: Any) -> float | None:
+    """Azimuth (radians, [-π, π]) of the largest radial peak across
+    all contour vertices in the cross-section. Used by axial-
+    consistency to detect helix-vs-stacked-rings."""
+    polys = list(cs.to_polygons())
+    if not polys:
+        return None
+    pts: list[tuple[float, float]] = []
+    for poly in polys:
+        for p in poly:
+            pts.append((float(p[0]), float(p[1])))
+    if not pts:
+        return None
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+    max_r = -1.0
+    max_theta = 0.0
+    for x, y in pts:
+        dx = x - cx
+        dy = y - cy
+        r = math.sqrt(dx * dx + dy * dy)
+        if r > max_r:
+            max_r = r
+            max_theta = math.atan2(dy, dx)
+    return max_theta
+
+
+def _check_axial_consistency(primary: ModuleEval, schema: dict) -> list[Defect]:
+    """Catches the bug class Channel-1's per-slice protrusion check
+    can't see: geometry that looks single-start at every individual
+    slice, but where the protrusion is at the SAME azimuth at every
+    z. That's stacked rings, not a helix.
+
+    Trigger when `axial_consistency: "helical"` is set in the schema.
+    Take the peak azimuth at each `horizontal_slices_at_z` slice;
+    if a strong majority of pairs are within ±10° of each other,
+    flag stacked-rings.
+    """
+    mode = schema.get("axial_consistency")
+    if mode != "helical":
+        return []
+    slices = schema.get("horizontal_slices_at_z") or []
+    if len(slices) < 2:
+        return []
+    azimuths: list[float] = []
+    for spec in slices:
+        if not isinstance(spec, dict) or "z" not in spec:
+            continue
+        z = float(spec["z"])
+        cs = _slice_at_z(primary.manifold, z)
+        if cs is None or cs.is_empty():
+            continue
+        az = _peak_azimuth(cs)
+        if az is not None:
+            azimuths.append(az)
+    if len(azimuths) < 2:
+        return []
+
+    near_match_pairs = 0
+    total_pairs = 0
+    for i in range(len(azimuths)):
+        for j in range(i + 1, len(azimuths)):
+            total_pairs += 1
+            diff = abs(azimuths[j] - azimuths[i])
+            diff = min(diff, 2 * math.pi - diff)  # cyclic distance
+            if diff < math.radians(10):
+                near_match_pairs += 1
+
+    # If >70% of pairs are at near-identical azimuths, every slice's
+    # peak is in the same place — stacked rings, not a helix.
+    if total_pairs > 0 and near_match_pairs / total_pairs > 0.7:
+        sample = ", ".join(f"{math.degrees(a):.0f}°" for a in azimuths)
+        return [
+            Defect(
+                severity="error",
+                where="axial_consistency",
+                expected="helical sweep (peak azimuths rotate across slices)",
+                actual=f"stacked-ring pattern (peak azimuths: {sample})",
+                hint=(
+                    "Every horizontal slice has its outer protrusion at the "
+                    "same azimuth. That's the signature of stacked translate+"
+                    "rotate clones, OR linear_extrude(twist=0) on a non-"
+                    "symmetric cross-section, NOT a true helical thread. "
+                    "Use a single linear_extrude with non-zero `twist` and "
+                    "enough `slices` (≥ |twist|/5) to produce a continuous "
+                    "helix."
+                ),
+            )
+        ]
+    return []
 
 
 def _cross_section_radius_range(cs: Any) -> tuple[float, float]:

@@ -86,16 +86,20 @@ the numbers a few percent. Sized for an M3 × 20 cap screw.
 {
   "bbox_z_extent": [22.0, 23.5],
   "bbox_xy_max": [5.30, 5.65],
+  "bbox_xy_symmetric": true,
   "volume_range": [120, 230],
   "connected_components": 1,
+  "axial_consistency": "helical",
   "expected_modules": [
     "shaft|thread",
     "head|cap"
   ],
   "horizontal_slices_at_z": [
     {"z": 5.0,  "outer_protrusions": 1, "radius_range": [1.10, 1.55]},
-    {"z": 10.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]},
-    {"z": 15.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]}
+    {"z": 8.0,  "outer_protrusions": 1, "radius_range": [1.10, 1.55]},
+    {"z": 11.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]},
+    {"z": 14.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]},
+    {"z": 17.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]}
   ]
 }
 ```
