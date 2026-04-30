@@ -37,6 +37,13 @@
     <div id="chat-pane">
       <div id="chat-log" data-testid="chat-log" role="log" aria-live="polite"></div>
       <div id="ask-user-area" data-testid="ask-user-area" hidden></div>
+      <div id="progress-pane" data-testid="progress-pane">
+        <div id="progress-header">
+          <span class="title">Progress</span>
+          <button id="progress-clear-btn" data-testid="progress-clear-btn" type="button" title="Clear progress log">Clear</button>
+        </div>
+        <div id="progress-panel" data-testid="progress-panel" role="log" aria-live="polite"></div>
+      </div>
       <form id="chat-form">
         <input id="chat-input" data-testid="chat-input" type="text"
                autocomplete="off" placeholder="Try: make a 20mm cube" />

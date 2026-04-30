@@ -3,11 +3,18 @@
 Single in-memory session per connection — fastcad is a single-user local
 app. The protocol is documented in the plan; in summary the browser sends
 {type: prompt|undo|redo|export_scad|reset|user_choice} and receives
-{type: scene_init|scene_delta|agent_message|ask_user|scad|tool_log}.
+{type: scene_init|scene_delta|agent_message|ask_user|scad|tool_log|progress}.
+
+`progress` events stream live during long-running agent turns (research
+subagents, tool calls). They flow from a sync `on_progress` callback the
+agent passes around: the WS layer wraps it with run_coroutine_threadsafe
+to bridge the executor thread back to the asyncio loop, and an
+`asyncio.Lock` on the WSContext serialises every send so concurrent
+emissions can't mangle frames.
 """
 from __future__ import annotations
 
-import base64
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -26,6 +33,8 @@ class WSContext:
     transcript: list[dict] = field(default_factory=list)
     pending_ask: dict | None = None
     ws_log: list[dict] = field(default_factory=list)  # outbound + inbound for feedback bundles
+    progress_seq: int = 0
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def _node_payload(ctx: WSContext, node_id: str) -> dict:
@@ -59,9 +68,13 @@ def _scene_delta(ctx: WSContext, added: list[str], updated: list[str], removed: 
 
 
 async def _send(ws: WebSocket, ctx: WSContext, payload: dict) -> None:
-    ctx.ws_log.append({"dir": "out", "t": time.time(), "type": payload.get("type"),
-                       "summary": _summary(payload)})
-    await ws.send_text(json.dumps(payload))
+    """All outbound WS sends go through here. The lock serialises
+    concurrent emissions (agent turn body + progress events scheduled
+    from worker threads) so frames stay coherent."""
+    async with ctx.send_lock:
+        ctx.ws_log.append({"dir": "out", "t": time.time(), "type": payload.get("type"),
+                           "summary": _summary(payload)})
+        await ws.send_text(json.dumps(payload))
 
 
 def _summary(payload: dict) -> dict:
@@ -77,7 +90,30 @@ def _summary(payload: dict) -> dict:
     if typ == "scad":
         src = payload.get("source", "")
         return {"type": typ, "len": len(src)}
+    if typ == "progress":
+        # Strip noisy nested event bodies for the feedback bundle.
+        ev = payload.get("event") or {}
+        return {
+            "type": typ,
+            "id": payload.get("id"),
+            "event_type": ev.get("type"),
+            "tool": ev.get("tool"),
+        }
     return {k: v for k, v in payload.items() if k != "mesh"}
+
+
+async def _emit_progress(ws: WebSocket, ctx: WSContext, raw_event: dict) -> None:
+    """Wrap a raw on_progress event in a `progress` WS message and
+    send it. ID is monotonic per session so the frontend can update
+    a previously-seen entry by id."""
+    ctx.progress_seq += 1
+    payload = {
+        "type": "progress",
+        "id": f"evt_{ctx.progress_seq}",
+        "event": raw_event,
+        "ts": time.time(),
+    }
+    await _send(ws, ctx, payload)
 
 
 async def _emit_turn(ws: WebSocket, ctx: WSContext, turn: AgentTurn) -> None:
@@ -97,6 +133,47 @@ async def _emit_turn(ws: WebSocket, ctx: WSContext, turn: AgentTurn) -> None:
         ctx.pending_ask = None
     if turn.tool_log:
         await _send(ws, ctx, {"type": "tool_log", "calls": turn.tool_log})
+
+
+def _make_progress_bridge(loop: asyncio.AbstractEventLoop, ws: WebSocket, ctx: WSContext):
+    """Returns a sync callable suitable for `run_turn(on_progress=…)`.
+    The callable is invoked from the executor thread; it schedules an
+    `_emit_progress` coroutine on the asyncio loop. Errors during
+    scheduling (e.g. loop closed because the WS disconnected) are
+    swallowed silently; we don't want a stale callback to crash the
+    research subagent."""
+    def on_progress(event: dict) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(_emit_progress(ws, ctx, event), loop)
+        except RuntimeError:
+            pass
+    return on_progress
+
+
+async def _run_turn_streaming(
+    ws: WebSocket,
+    ctx: WSContext,
+    text: str,
+) -> AgentTurn | None:
+    """Run a turn in an executor so the WS event loop stays free to
+    flush progress events. Returns None on agent error (already
+    surfaced as an `error` WS message)."""
+    loop = asyncio.get_running_loop()
+    on_progress = _make_progress_bridge(loop, ws, ctx)
+    try:
+        return await loop.run_in_executor(
+            None,
+            lambda: run_turn(
+                text,
+                ctx.session,
+                transcript=ctx.transcript,
+                pending_ask=ctx.pending_ask,
+                on_progress=on_progress,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        await _send(ws, ctx, {"type": "error", "message": f"agent error: {exc}"})
+        return None
 
 
 async def handle(ws: WebSocket) -> None:
@@ -121,30 +198,24 @@ async def _dispatch(ws: WebSocket, ctx: WSContext, msg: dict[str, Any]) -> None:
     typ = msg.get("type")
     if typ == "prompt":
         text = str(msg.get("text", ""))
-        try:
-            turn = run_turn(text, ctx.session, transcript=ctx.transcript, pending_ask=ctx.pending_ask)
-        except Exception as exc:  # noqa: BLE001
-            await _send(ws, ctx, {"type": "error", "message": f"agent error: {exc}"})
-            return
-        await _emit_turn(ws, ctx, turn)
+        turn = await _run_turn_streaming(ws, ctx, text)
+        if turn is not None:
+            await _emit_turn(ws, ctx, turn)
         return
     if typ == "user_choice":
         # User picked an option from the previous ask_user.
         text = str(msg.get("text", ""))
-        try:
-            turn = run_turn(text, ctx.session, transcript=ctx.transcript, pending_ask=ctx.pending_ask)
-        except Exception as exc:  # noqa: BLE001
-            await _send(ws, ctx, {"type": "error", "message": f"agent error: {exc}"})
-            return
-        await _emit_turn(ws, ctx, turn)
+        turn = await _run_turn_streaming(ws, ctx, text)
+        if turn is not None:
+            await _emit_turn(ws, ctx, turn)
         return
     if typ == "undo":
-        cs = ctx.session.undo()
+        ctx.session.undo()
         await _send(ws, ctx, _scene_init(ctx))
         await _send(ws, ctx, {"type": "agent_message", "text": "undone."})
         return
     if typ == "redo":
-        cs = ctx.session.redo()
+        ctx.session.redo()
         await _send(ws, ctx, _scene_init(ctx))
         await _send(ws, ctx, {"type": "agent_message", "text": "redone."})
         return

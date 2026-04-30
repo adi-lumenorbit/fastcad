@@ -253,9 +253,131 @@ function handleServerMessage(payload) {
     case "tool_log":
       for (const c of payload.calls) addMessage("tool", `${c.name}(${JSON.stringify(c.args)})`);
       break;
+    case "progress": handleProgress(payload); break;
     case "scad": exportScad(payload.source); break;
     case "error": addMessage("agent", `[error] ${payload.message}`); break;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Progress panel — live tool / research events
+// ---------------------------------------------------------------------------
+
+const progressPanel = document.getElementById("progress-panel");
+const progressClearBtn = document.getElementById("progress-clear-btn");
+// Stack of currently-running entries: {kind: "tool_call"|"research", tool?, el}.
+// On each `*_done` / `*_error` we pop the matching topmost entry.
+const progressStack = [];
+
+function handleProgress(payload) {
+  const ev = payload.event || {};
+  const t = ev.type || "";
+
+  if (t === "tool_call_started") {
+    const el = appendProgressEntry("running", `◷ ${ev.tool}`);
+    progressStack.push({ kind: "tool_call", tool: ev.tool, el });
+    return;
+  }
+  if (t === "tool_call_done") {
+    finalizeMatching("tool_call", ev.tool, "done", `✓ ${ev.tool}` + summarySuffix(ev.summary));
+    return;
+  }
+  if (t === "tool_call_error") {
+    finalizeMatching("tool_call", ev.tool, "error", `✗ ${ev.tool} — ${truncate(ev.error || "error", 80)}`);
+    return;
+  }
+  if (t === "research_started") {
+    const label = ev.topic || ev.slug || "(unknown)";
+    const el = appendProgressEntry("running", `▸ research(${label})`);
+    progressStack.push({ kind: "research", el });
+    return;
+  }
+  if (t === "research_done") {
+    const label = ev.title || ev.slug || "(done)";
+    const detail = ev.cache_path ? ` → ${ev.cache_path}` : "";
+    finalizeMatching("research", null, "done", `✓ research(${label})${detail}`);
+    return;
+  }
+  if (t === "research_error") {
+    finalizeMatching("research", null, "error", `✗ research — ${truncate(ev.error || "error", 100)}`);
+    return;
+  }
+
+  // Subagent stream chunks: render as nested sub-entries when a research
+  // call is currently active; ignore otherwise (the parent tool_call
+  // events already cover non-research tools).
+  if (progressStack.some((e) => e.kind === "research")) {
+    const text = describeStreamEvent(ev);
+    if (text) appendProgressEntry("sub", `  · ${text}`);
+  }
+}
+
+function appendProgressEntry(statusClass, text) {
+  const el = document.createElement("div");
+  el.className = `progress-entry ${statusClass}`;
+  el.textContent = text;
+  el.dataset.testid = "progress-entry";
+  progressPanel.appendChild(el);
+  progressPanel.scrollTop = progressPanel.scrollHeight;
+  return el;
+}
+
+function finalizeMatching(kind, tool, statusClass, text) {
+  // Pop the topmost matching open entry (LIFO so nested tool_calls
+  // close in the right order).
+  for (let i = progressStack.length - 1; i >= 0; i--) {
+    const entry = progressStack[i];
+    if (entry.kind !== kind) continue;
+    if (tool != null && entry.tool !== tool) continue;
+    progressStack.splice(i, 1);
+    entry.el.classList.remove("running");
+    entry.el.classList.add(statusClass);
+    entry.el.textContent = text;
+    return;
+  }
+  // No matching open entry — emit a new line so the user still sees it.
+  appendProgressEntry(statusClass, text);
+}
+
+function summarySuffix(summary) {
+  if (!summary || typeof summary !== "object") return "";
+  if (summary.added || summary.updated || summary.removed) {
+    const parts = [];
+    if (summary.added && summary.added.length) parts.push(`+${summary.added.join(",")}`);
+    if (summary.updated && summary.updated.length) parts.push(`~${summary.updated.join(",")}`);
+    if (summary.removed && summary.removed.length) parts.push(`-${summary.removed.join(",")}`);
+    if (parts.length) return ` — ${parts.join(" ")}`;
+  }
+  if (summary.cache_path) return ` — ${summary.cache_path}`;
+  if (typeof summary.count === "number") return ` — ${summary.count} entries`;
+  if (summary.ok === false) return ` — error`;
+  return "";
+}
+
+function describeStreamEvent(ev) {
+  if (ev.type === "system") return `init`;
+  if (ev.type === "assistant" && ev.message && Array.isArray(ev.message.content)) {
+    const tool = ev.message.content.find((b) => b.type === "tool_use");
+    if (tool) return `tool: ${tool.name}`;
+    const text = ev.message.content.find((b) => b.type === "text");
+    if (text && text.text) return truncate(text.text, 80);
+  }
+  if (ev.type === "user" && ev.message) return "tool result";
+  if (ev.type === "result") return `result: ${ev.subtype || ""}`.trim();
+  return "";
+}
+
+function truncate(s, n) {
+  if (!s) return "";
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + "…";
+}
+
+if (progressClearBtn) {
+  progressClearBtn.addEventListener("click", () => {
+    progressPanel.innerHTML = "";
+    progressStack.length = 0;
+  });
 }
 
 function exportScad(source) {
@@ -309,6 +431,8 @@ window.fastcad.renderer = renderer;
 window.fastcad.meshMap = meshMap;
 window.fastcad.wsLog = wsLog;
 window.fastcad.send = send;
+window.fastcad.progressPanel = progressPanel;
+window.fastcad.progressEntryCount = () => progressPanel.querySelectorAll(".progress-entry").length;
 window.fastcad.snapshotViewer = () => renderer.domElement.toDataURL("image/png");
 window.fastcad.cameraState = () => ({
   position: camera.position.toArray(),
