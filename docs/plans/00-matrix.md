@@ -32,7 +32,7 @@ new chat-pane panel below the chat log.
 
 | #  | Item | Issue | research | tools | ws | web | cache | tests |
 |----|------|-------|----------|-------|----|-----|-------|-------|
-| 04 | [research subsystem](./04-stage2-research.md) | [#4](https://github.com/adi-lumenorbit/fastcad/issues/4) | MISS | MISS | MISS | MISS | MISS | MISS |
+| 04 | [research subsystem](./04-stage2-research.md) | [#4](https://github.com/adi-lumenorbit/fastcad/issues/4) | OK | OK | OK | OK | OK | OK |
 
 ## Roadmap (filed as issues when scoped)
 
