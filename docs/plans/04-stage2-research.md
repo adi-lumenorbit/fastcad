@@ -1,9 +1,10 @@
-# Stage 2 — research subsystem + cache + progress panel (DRAFT)
+# 04 — Stage 2: research subsystem + cache + progress panel
 
-> **Status:** draft. No GitHub issue filed yet — rename this file to
-> `<NN>-stage2-research.md` once the issue exists, per
-> `CLAUDE-issue.md`. The companion Phase A cleanup ships first as part
-> of PR #3.
+GitHub issue: https://github.com/adi-lumenorbit/fastcad/issues/4
+
+The companion Phase A cleanup (strip hardcoded standards from prompt
++ plan + tests; CLAUDE.md anti-hardcoding rule) ships in PR #3 as
+part of Stage 1.
 
 ## Context
 

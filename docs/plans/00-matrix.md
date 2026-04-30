@@ -23,6 +23,17 @@ manifold3d evaluator with dependency-aware caching.
 |----|------|-------|--------|------|-------|------|--------|---------|----|-------|-------|
 | 02 | [.scad-as-spec](./02-stage1-scad-spec.md) | [#2](https://github.com/adi-lumenorbit/fastcad/issues/2) | OK | OK | OK | OK | OK | OK | OK | OK | OK |
 
+## Stage 2 — research subsystem + cache + progress UI
+
+Lets the agent invoke a Claude Code subagent for deep research on
+standardized parts, caches results as text files in `docs/research/`
+(human-editable, git-tracked), and surfaces real-time progress in a
+new chat-pane panel below the chat log.
+
+| #  | Item | Issue | research | tools | ws | web | cache | tests |
+|----|------|-------|----------|-------|----|-----|-------|-------|
+| 04 | [research subsystem](./04-stage2-research.md) | [#4](https://github.com/adi-lumenorbit/fastcad/issues/4) | MISS | MISS | MISS | MISS | MISS | MISS |
+
 ## Roadmap (filed as issues when scoped)
 
 | Title | Notes |
