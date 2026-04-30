@@ -134,6 +134,59 @@ def test_polygon_in_linear_extrude():
     assert k.volume(me.manifold) == pytest.approx(0.5, abs=1e-5)
 
 
+def test_linear_extrude_with_twist_uses_slices_for_resolution():
+    """An agent emitting `slices = N` should get N twist divisions
+    even when `$fn` is something nonsensical like 1 (real OpenSCAD's
+    linear_extrude treats $fn=1 as a no-op when slices is set).
+
+    Without honoring `slices`, manifold3d gets 1 division for the
+    entire helix and produces a discontinuous ribbon instead of a
+    smooth thread."""
+    from fastcad.model import kernel as k
+
+    src_high_res = """
+linear_extrude(height = 10, twist = -3600, slices = 360, $fn = 1)
+  translate([1, 0, 0])
+    polygon([[0, 0], [0.3, 0.25], [0, 0.5]]);
+"""
+    out = _eval(src_high_res)
+    me = out["linear_extrude"]
+    mesh_high = me.manifold.to_mesh()
+    n_tris_high = len(mesh_high.tri_verts)
+
+    src_low_res = """
+linear_extrude(height = 10, twist = -3600, slices = 4, $fn = 1)
+  translate([1, 0, 0])
+    polygon([[0, 0], [0.3, 0.25], [0, 0.5]]);
+"""
+    out = _eval(src_low_res)
+    me = out["linear_extrude"]
+    mesh_low = me.manifold.to_mesh()
+    n_tris_low = len(mesh_low.tri_verts)
+
+    # High-resolution helix has dramatically more triangles.
+    assert n_tris_high > n_tris_low * 10, (
+        f"slices not honored: high={n_tris_high} tris, low={n_tris_low} tris"
+    )
+
+
+def test_linear_extrude_auto_picks_resolution_when_no_slices_or_fn():
+    """When neither slices nor $fn is set, twist gets a reasonable
+    default density (~5° per slice) so a 36-turn helix doesn't render
+    as a single ribbon."""
+    src = """
+linear_extrude(height = 10, twist = 3600)
+  translate([1, 0, 0])
+    polygon([[0, 0], [0.3, 0.25], [0, 0.5]]);
+"""
+    out = _eval(src)
+    me = out["linear_extrude"]
+    n_tris = len(me.manifold.to_mesh().tri_verts)
+    # 3600° / 5° ≈ 720 slices, each contributes O(triangle-edges)
+    # triangles. Empirically this is in the thousands.
+    assert n_tris > 1000, f"auto-resolution too coarse: {n_tris} tris"
+
+
 def test_rotate_extrude_creates_torus_like():
     src = """
 $fn = 96;

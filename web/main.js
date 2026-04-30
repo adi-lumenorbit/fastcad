@@ -72,11 +72,16 @@ const grid = new THREE.GridHelper(200, 20, 0x444444, 0x333333);
 grid.rotation.x = Math.PI / 2;
 scene.add(grid);
 
+// flatShading: every triangle gets its own normal. This is the right
+// default for CAD: sharp edges between cylinder side / top stay sharp;
+// thread teeth read as faceted teeth instead of being smoothed into a
+// continuous spiral that looks like dust. Curved surfaces look slightly
+// faceted but $fn=64 makes that nearly invisible.
 const meshMaterial = new THREE.MeshStandardMaterial({
   color: 0xc9c1a8,
   metalness: 0.05,
   roughness: 0.65,
-  flatShading: false,
+  flatShading: true,
 });
 
 // nodeId -> THREE.Mesh

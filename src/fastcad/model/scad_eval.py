@@ -675,8 +675,31 @@ def _builtin_linear_extrude(call: ModuleCall, env: Env) -> Geometry:
         scale_top = (_to_num(scale_v[0]), _to_num(scale_v[1]))
     else:
         scale_top = (1.0, 1.0)
-    fn = int(_to_num(args.get("$fn", env.vars.get("$fn", 0))))
-    n_div = max(0, fn) if twist != 0 else 0
+
+    # Twist resolution: prefer the explicit `slices` arg (real OpenSCAD's
+    # primary control). Fall back to `$fn` (the call-local one beats the
+    # global), then auto-pick from twist magnitude. With twist=0 we use
+    # 0 divisions (manifold3d's default — single slice is sufficient
+    # without rotation).
+    if twist == 0:
+        n_div = 0
+    elif "slices" in args:
+        n_div = max(1, int(_to_num(args["slices"], "linear_extrude slices")))
+    else:
+        local_fn = args.get("$fn")
+        if local_fn is not None:
+            local_fn_val = int(_to_num(local_fn, "linear_extrude $fn"))
+        else:
+            local_fn_val = int(_to_num(env.vars.get("$fn", 0)))
+        # `$fn=1` in real OpenSCAD's linear_extrude is a no-op, not a
+        # demand for one slice — treat it as "use the auto default."
+        if local_fn_val > 1:
+            n_div = local_fn_val
+        else:
+            # Auto: ~5° per slice, clamped to a reasonable range. Keeps
+            # tight helices smooth without explosively-many triangles.
+            n_div = max(32, min(2048, int(abs(twist) / 5)))
+
     child = eval_stmts(call.children, env)
     if child is None:
         raise EvalError("linear_extrude requires a 2D child")
