@@ -1,77 +1,128 @@
+"""Tests for the rewritten SessionState (current_source + undo / redo
+stacks + per-id cache, replacing the previous op log)."""
+from __future__ import annotations
+
 import pytest
 
-from fastcad.session import SessionState
-from fastcad.model.ops import AddPrimitive, Boolean
+from fastcad.model.scad_eval import EvalError
+from fastcad.model.scad_parser import ScadParseError
+from fastcad.session import INITIAL_SOURCE, SessionState
 
 
-def _add_cube(s: SessionState, name: str | None = None, size=(10, 10, 10)) -> str:
-    nid = name or s.fresh_id("cube")
-    s.append(AddPrimitive(kind="cube", params={"size": list(size)}, node_id=nid))
-    return nid
-
-
-def test_append_advances_head():
+def test_initial_state():
     s = SessionState()
-    _add_cube(s)
-    assert s.head == 1
-    assert len(s.log) == 1
+    assert s.current_source == INITIAL_SOURCE
+    assert s.cache == {}
+    assert not s.can_undo()
+    assert not s.can_redo()
+
+
+def test_set_source_creates_node():
+    s = SessionState()
+    cs = s.set_source("cube([10, 10, 10]);")
+    assert cs.added == ["cube"]
+    assert "cube" in s.cache
     assert s.can_undo()
-    assert not s.can_redo()
 
 
-def test_undo_redo_round_trip():
+def test_set_source_no_geometry_change_still_pushes_undo():
+    """Even if the new source produces the same geometry, the source
+    string changed (perhaps a comment was added), so undo should be
+    enabled."""
     s = SessionState()
-    a = _add_cube(s, name="a")
-    b = _add_cube(s, name="b", size=(2, 2, 2))
-    assert set(s.scene.order) == {"a", "b"}
+    s.set_source("cube([1, 1, 1]);")
+    s.set_source("// comment\ncube([1, 1, 1]);")
+    assert s.can_undo()
+
+
+def test_undo_restores_prior_source():
+    s = SessionState()
+    s.set_source("cube([1, 1, 1]);")
+    s.set_source("sphere(r = 1);")
+    assert "sphere" in s.cache
     s.undo()
-    assert set(s.scene.order) == {"a"}
+    assert "cube" in s.cache
+    assert "sphere" not in s.cache
     assert s.can_redo()
+
+
+def test_redo_restores_undone_source():
+    s = SessionState()
+    s.set_source("cube([1, 1, 1]);")
+    s.set_source("sphere(r = 1);")
+    s.undo()
     s.redo()
-    assert set(s.scene.order) == {"a", "b"}
-    assert not s.can_redo()
+    assert "sphere" in s.cache
 
 
-def test_append_after_undo_truncates_tail():
+def test_set_source_after_undo_truncates_redo():
     s = SessionState()
-    _add_cube(s, name="a")
-    _add_cube(s, name="b")
+    s.set_source("cube([1, 1, 1]);")
+    s.set_source("sphere(r = 1);")
     s.undo()
     assert s.can_redo()
-    _add_cube(s, name="c")
+    s.set_source("cylinder(h = 2, r = 1);")
     assert not s.can_redo()
-    assert [op.node_id for op in s.log] == ["a", "c"]
-    assert set(s.scene.order) == {"a", "c"}
+    assert "cylinder" in s.cache
+    assert "sphere" not in s.cache
 
 
-def test_undo_with_empty_log_is_noop():
+def test_undo_with_empty_stack_is_noop():
     s = SessionState()
     cs = s.undo()
-    assert cs.added == [] and cs.updated == [] and cs.removed == []
-    assert s.head == 0
+    assert cs.added == []
+    assert cs.updated == []
+    assert cs.removed == []
 
 
-def test_undo_through_boolean():
+def test_reset_clears_state():
     s = SessionState()
-    _add_cube(s, name="a", size=(10, 10, 10))
-    s.append(
-        AddPrimitive(
-            kind="cylinder",
-            params={"height": 20, "radius": 2, "segments": 64},
-            node_id="cyl",
-            anchor_to="a",
-            anchor="bottom",
-        )
-    )
-    s.append(Boolean(kind="difference", target_id="a", with_id="cyl"))
-    assert "cyl" not in s.scene.nodes
-    s.undo()  # undoes the boolean -> cylinder is back, cube is whole again
-    assert set(s.scene.order) == {"a", "cyl"}
-    s.undo()  # undoes the cylinder add -> just cube
-    assert set(s.scene.order) == {"a"}
+    s.set_source("cube([1, 1, 1]);")
+    s.reset()
+    assert s.current_source == INITIAL_SOURCE
+    assert s.cache == {}
+    assert not s.can_undo()
+    assert not s.can_redo()
 
 
-def test_fresh_id_is_unique():
+def test_set_source_parse_error_does_not_mutate():
     s = SessionState()
-    seen = {s.fresh_id("x") for _ in range(50)}
-    assert len(seen) == 50
+    s.set_source("cube([10, 10, 10]);")
+    prev_src = s.current_source
+    prev_cache = dict(s.cache)
+    with pytest.raises(ScadParseError):
+        s.set_source("cube(missing semicolon\n")
+    assert s.current_source == prev_src
+    assert s.cache == prev_cache
+
+
+def test_set_source_eval_error_does_not_mutate():
+    s = SessionState()
+    s.set_source("cube([10, 10, 10]);")
+    prev_src = s.current_source
+    with pytest.raises(EvalError):
+        s.set_source("nonexistent_module();")
+    assert s.current_source == prev_src
+
+
+def test_set_source_incremental_only_invalidates_dependents():
+    s = SessionState()
+    s.set_source("""
+length = 10;
+module a() { cube([length, 1, 1]); }
+module b() { cube([1, 1, 5]); }
+a(); b();
+""")
+    a_before = s.cache["a"]
+    b_before = s.cache["b"]
+    cs = s.set_source("""
+length = 20;
+module a() { cube([length, 1, 1]); }
+module b() { cube([1, 1, 5]); }
+a(); b();
+""")
+    # a was invalidated; b cache-hit.
+    assert "a" in cs.updated
+    assert "b" not in cs.updated
+    assert s.cache["b"] is b_before  # same object
+    assert s.cache["a"] is not a_before

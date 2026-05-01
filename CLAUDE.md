@@ -25,6 +25,61 @@ browser on Windows.
   removing it or adding a special case.
 - **Do not read files from other projects.** Stay within this repo.
 
+## No hardcoded designs in prompts, plans, or specs
+
+The agent's system prompt MUST NOT contain worked examples with
+specific dimensions, standards lookups, or sample implementations of
+a particular part. Each user request drives an independent recall-
+and-design pass; baking specifics into the prompt teaches the agent
+the wrong patterns and propagates bugs verbatim. We learned this the
+hard way — a worked M3-screw example in `agent/system_prompt.py` had
+a 12-start-thread bug, and the agent dutifully copied it.
+
+This applies to:
+- Tables of standardized dimensions (M-series threads, DIN/ISO head
+  specs, NEMA frames, ISO bolts, etc.).
+- Sample `.scad` source for a particular part baked into the prompt.
+- "Worked example" sections that demonstrate one specific design.
+- Plan files in `docs/plans/` that include reference dimensions in
+  prose. The plan describes the architecture, not the implementation
+  for a specific part.
+- Test fixtures or test names that pin to a particular standard.
+  Use neutral names like `test_threaded_extrude_fixture_*`. **Both
+  the identifier *and* the fixture content matter**: if the test
+  body recapitulates a specific standard ("here's an M3 spec, here's
+  the matching .scad, assert they line up"), that's the same risk
+  as a worked example in the prompt — the implementation pattern
+  ends up reinforced via the agent's training/eval feedback loop
+  and overfits to that one part. Test inputs may use any numbers
+  (they're just numbers), but neither the identifier nor the
+  fixture's structural content should encode a specific standard.
+
+  Why this matters: the agent reads its own past output through the
+  test corpus when iterating on prompts/system messages. A test
+  asserting "for M3 the answer is X" steers the agent toward X for
+  M3 specifically, even when the architectural intent was "for any
+  standardized fastener, the validator catches Y." Overfitting at
+  the prompt level breaks generalization.
+
+What IS allowed in the system prompt:
+- The OpenSCAD subset language description.
+- Tool descriptions.
+- Style / formatting / output conventions (the "beautify" rules).
+- General modeling principles ("single-start threads by default",
+  "state the standard you assumed", "recall, don't approximate").
+- Pointers to the research cache (`docs/research/` once Stage 2
+  ships) and how to use it.
+
+If you find yourself adding a worked example or a dimension table to
+the prompt, stop. The agent is capable of recalling the relevant
+spec from its training — the example just constrains it to your
+particular interpretation. For one-off references during a
+conversation, use a chat reply, not a committed file.
+
+This is parallel to the "no auto-memory" principle in `## Memory`
+below: durable knowledge goes in repo files, not in the agent's
+runtime context.
+
 ## Critical Design Rules
 
 > **Before any change to `src/fastcad/model/scene.py`,
@@ -234,6 +289,24 @@ include:
 - **Push/merge instructions**: explicit steps for how the changes get
   committed, pushed, and (if applicable) merged via PR.
 - **Verification steps**: how to confirm the plan was executed correctly.
+
+### Plan file location — never use `~/.claude/plans/`
+
+NEVER write durable plans to `~/.claude/plans/` (the harness plan-mode
+directory). That directory is per-machine, outside the repo, invisible
+to PR review, and disappears when the harness session ends.
+
+The harness plan-mode file (e.g. `~/.claude/plans/<adjective-noun>.md`)
+is a transient scratch the harness creates when entering plan mode.
+**Treat it as a draft to relocate.** As soon as the plan is meant to
+survive the session — or whenever a user asks to save / share / review
+it — move its content to `docs/plans/<NN>-<slug>.md` (or
+`docs/plans/<slug>-draft.md` if no GitHub issue is filed yet) and
+delete the harness file so there's no parallel copy that can drift.
+
+Same principle as the "no auto-memory" rule below: durable knowledge
+goes in repo files. The harness scratch is a working surface, not a
+home.
 
 ## Issue Workflow
 

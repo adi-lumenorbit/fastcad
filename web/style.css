@@ -38,6 +38,26 @@ html, body {
   gap: 8px;
 }
 
+#viewer-help {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: #888;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 4px 10px;
+  border-radius: 4px;
+  pointer-events: none;
+  user-select: none;
+}
+
+#viewer-help b {
+  color: #ddd;
+  font-weight: 600;
+}
+
 #viewer-overlay button {
   padding: 6px 12px;
   background: rgba(0, 0, 0, 0.55);
@@ -57,10 +77,17 @@ html, body {
   flex-direction: column;
   border-left: 1px solid #333;
   background: #202020;
+  /* Constrain to viewport so children's flex sizing & overflow work. */
+  min-height: 0;
+  overflow: hidden;
 }
 
 #chat-log {
-  flex: 1;
+  /* Take half of the remaining space; min-height: 0 lets the flexbox
+     actually constrain it (otherwise children's scrollHeight wins and
+     the whole pane scrolls as one). */
+  flex: 1 1 50%;
+  min-height: 0;
   padding: 12px;
   overflow-y: auto;
   font-size: 13px;
@@ -112,9 +139,148 @@ html, body {
   cursor: pointer;
 }
 
+/* Drag handle between chat-log and progress-pane. The JS handler
+   in main.js mutates --pane-split (a percentage 0..100) on chat-pane;
+   chat-log + progress-pane derive their flex-basis from it. */
+#pane-divider {
+  height: 6px;
+  background: #2a2a2a;
+  border-top: 1px solid #1a1a1a;
+  border-bottom: 1px solid #1a1a1a;
+  cursor: row-resize;
+  flex-shrink: 0;
+  user-select: none;
+  transition: background 0.1s;
+}
+
+#pane-divider:hover,
+#pane-divider.dragging {
+  background: #4a4a4a;
+}
+
+#chat-pane {
+  /* Default split: 60% chat-log / 40% progress-pane. Overridden at
+     runtime by JS on drag. */
+  --pane-split: 60;
+}
+
+#chat-log {
+  flex-basis: calc(var(--pane-split, 60) * 1%);
+}
+
+#progress-pane {
+  display: flex;
+  flex-direction: column;
+  background: #181818;
+  /* Complement of chat-log's basis so they sum to ~100% of the
+     resizable area. min-height: 0 lets the inner panel overflow
+     internally rather than expanding the parent. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #888;
+  background: #141414;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+#progress-header .title {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+#progress-clear-btn {
+  padding: 2px 8px;
+  background: transparent;
+  color: #888;
+  border: 1px solid #444;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+#progress-clear-btn:hover {
+  background: #2a2a2a;
+  color: #ccc;
+}
+
+#progress-panel {
+  flex: 1 1 auto;
+  min-height: 0;          /* allows inner overflow inside flex parent */
+  overflow-y: auto;
+  padding: 4px 8px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: #aaa;
+}
+
+.progress-entry {
+  padding: 1px 2px;
+  white-space: pre;
+}
+
+.progress-entry.running {
+  color: #d4d4aa;
+}
+
+.progress-entry.done {
+  color: #88c399;
+}
+
+.progress-entry.error {
+  color: #d77;
+}
+
+.progress-entry.warning {
+  color: #d4a05a;
+}
+
+.progress-entry.sub {
+  color: #666;
+  padding-left: 14px;
+  font-size: 10px;
+}
+
 #chat-form {
   display: flex;
   border-top: 1px solid #333;
+}
+
+#agent-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: auto;
+  padding: 0 6px;
+  font-size: 14px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  background: #1a1a1a;
+  color: #555;
+  user-select: none;
+  transition: color 0.1s;
+}
+
+#agent-status[data-state="thinking"] {
+  color: #d4d4aa;
+}
+
+#agent-status[data-state="stuck"] {
+  color: #d77;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1.0; }
+  50%      { opacity: 0.4; }
 }
 
 #chat-input {

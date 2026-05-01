@@ -45,10 +45,10 @@ def test_second_prompt_only_adds_one_mesh(live_server: str, page) -> None:
 
     uuid_after = page.evaluate(
         """() => {
-            for (const m of window.fastcad.meshMap.values()) {
-                if (m.userData.kind === 'cube') return m.uuid;
-            }
-            return null;
+            // Under the .scad-spec model the agent names modules
+            // semantically; the fake mode emits cube_1 / sphere_1.
+            const m = window.fastcad.meshMap.get('cube_1');
+            return m ? m.uuid : null;
         }"""
     )
     # The cube mesh object identity is preserved across the second prompt —

@@ -14,8 +14,10 @@ dependencies = [
   "anthropic>=0.39",
   "pydantic>=2.6",
   "numpy>=1.26",
+  "Pillow>=10.0",
   "python-multipart>=0.0.9",
   "websockets>=12",
+  "lark>=1.1",
 ]
 
 [project.optional-dependencies]

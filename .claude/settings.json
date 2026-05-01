@@ -36,6 +36,7 @@
       "Bash(gh -R *)",
       "Bash(ls *)",
       "Bash(mkdir *)",
+      "Bash(mkdir -p *)",
       "Bash(cp *)",
       "Bash(mv *)",
       "Bash(chmod *)",

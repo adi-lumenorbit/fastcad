@@ -23,14 +23,33 @@
       <div id="viewer-overlay">
         <button id="undo-btn" data-testid="undo-btn" type="button">Undo</button>
         <button id="redo-btn" data-testid="redo-btn" type="button">Redo</button>
+        <button id="home-btn" data-testid="home-btn" type="button" title="Recenter view (h)">Home</button>
         <button id="export-btn" data-testid="export-btn" type="button">Export .scad</button>
-        <button id="reset-btn" data-testid="reset-btn" type="button">Reset</button>
+        <button id="reset-btn" data-testid="reset-btn" type="button" title="Clear scene">Reset</button>
+      </div>
+      <div id="viewer-help" data-testid="viewer-help">
+        <span><b>L-drag</b> rotate</span>
+        <span><b>R-drag</b> pan</span>
+        <span><b>Wheel</b> zoom</span>
+        <span><b>H</b> home</span>
       </div>
     </div>
     <div id="chat-pane">
       <div id="chat-log" data-testid="chat-log" role="log" aria-live="polite"></div>
       <div id="ask-user-area" data-testid="ask-user-area" hidden></div>
+      <div id="pane-divider" data-testid="pane-divider" role="separator"
+           aria-orientation="horizontal" tabindex="0"
+           title="Drag to resize chat / progress split"></div>
+      <div id="progress-pane" data-testid="progress-pane">
+        <div id="progress-header">
+          <span class="title">Progress</span>
+          <button id="progress-clear-btn" data-testid="progress-clear-btn" type="button" title="Clear progress log">Clear</button>
+        </div>
+        <div id="progress-panel" data-testid="progress-panel" role="log" aria-live="polite"></div>
+      </div>
       <form id="chat-form">
+        <span id="agent-status" data-testid="agent-status"
+              data-state="idle" title="Agent state: idle">●</span>
         <input id="chat-input" data-testid="chat-input" type="text"
                autocomplete="off" placeholder="Try: make a 20mm cube" />
         <button id="chat-send-btn" data-testid="chat-send-btn" type="submit">Send</button>

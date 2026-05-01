@@ -25,12 +25,41 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x202020);
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
-camera.position.set(80, -80, 60);
+const HOME_POSITION = new THREE.Vector3(80, -80, 60);
+const HOME_TARGET = new THREE.Vector3(0, 0, 0);
+camera.position.copy(HOME_POSITION);
 camera.up.set(0, 0, 1);
 
 const controls = new OrbitControls(camera, canvas);
-controls.target.set(0, 0, 0);
+controls.target.copy(HOME_TARGET);
+controls.screenSpacePanning = true;        // CAD-style: pan slides parallel to screen
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.listenToKeyEvents(window);        // arrow keys pan when window has focus
+controls.keyPanSpeed = 14;
 controls.update();
+
+function recenterCamera() {
+  // Auto-frame on visible meshes if any, else go home.
+  if (window.fastcad && window.fastcad.meshMap && window.fastcad.meshMap.size > 0) {
+    const box = new THREE.Box3();
+    for (const m of window.fastcad.meshMap.values()) box.expandByObject(m);
+    if (!box.isEmpty()) {
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3()).length() || 50;
+      controls.target.copy(center);
+      const dir = new THREE.Vector3(1, -1, 0.75).normalize();
+      camera.position.copy(center).addScaledVector(dir, size * 1.6);
+      camera.up.set(0, 0, 1);
+      controls.update();
+      return;
+    }
+  }
+  camera.position.copy(HOME_POSITION);
+  controls.target.copy(HOME_TARGET);
+  camera.up.set(0, 0, 1);
+  controls.update();
+}
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.45));
 const dir = new THREE.DirectionalLight(0xffffff, 0.85);
@@ -43,11 +72,16 @@ const grid = new THREE.GridHelper(200, 20, 0x444444, 0x333333);
 grid.rotation.x = Math.PI / 2;
 scene.add(grid);
 
+// flatShading: every triangle gets its own normal. This is the right
+// default for CAD: sharp edges between cylinder side / top stay sharp;
+// thread teeth read as faceted teeth instead of being smoothed into a
+// continuous spiral that looks like dust. Curved surfaces look slightly
+// faceted but $fn=64 makes that nearly invisible.
 const meshMaterial = new THREE.MeshStandardMaterial({
   color: 0xc9c1a8,
   metalness: 0.05,
   roughness: 0.65,
-  flatShading: false,
+  flatShading: true,
 });
 
 // nodeId -> THREE.Mesh
@@ -173,6 +207,8 @@ function showAsk(question, options) {
       addMessage("user", opt);
       send({ type: "user_choice", text: opt });
       clearAsk();
+      setAgentStatus("thinking");
+      bumpStuckTimer();
     });
     opts.appendChild(b);
   }
@@ -219,14 +255,306 @@ function handleServerMessage(payload) {
   switch (payload.type) {
     case "scene_init": applySceneInit(payload); break;
     case "scene_delta": applySceneDelta(payload); break;
-    case "agent_message": addMessage("agent", payload.text); break;
-    case "ask_user": showAsk(payload.question, payload.options); break;
+    case "agent_message":
+      addMessage("agent", payload.text);
+      // Final assistant message = end of turn.
+      setAgentStatus("idle");
+      break;
+    case "ask_user":
+      showAsk(payload.question, payload.options);
+      // Waiting on the user, not the agent.
+      setAgentStatus("idle");
+      break;
     case "tool_log":
-      for (const c of payload.calls) addMessage("tool", `${c.name}(${JSON.stringify(c.args)})`);
+      for (const c of payload.calls) addMessage("tool", `${c.name}(${formatToolArgs(c.args)})`);
+      break;
+    case "progress":
+      handleProgress(payload);
+      // Any progress event = agent is doing something. Reset stuck
+      // timer; keep state as thinking.
+      if (agentStatus && agentStatus.dataset.state !== "idle") {
+        setAgentStatus("thinking");
+        bumpStuckTimer();
+      }
       break;
     case "scad": exportScad(payload.source); break;
-    case "error": addMessage("agent", `[error] ${payload.message}`); break;
+    case "error":
+      addMessage("agent", `[error] ${payload.message}`);
+      setAgentStatus("idle");
+      break;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Progress panel — live tool / research events
+// ---------------------------------------------------------------------------
+
+const progressPanel = document.getElementById("progress-panel");
+const progressClearBtn = document.getElementById("progress-clear-btn");
+// Stack of currently-running entries: {kind: "tool_call"|"research", tool?, el}.
+// On each `*_done` / `*_error` we pop the matching topmost entry.
+const progressStack = [];
+
+function handleProgress(payload) {
+  const ev = payload.event || {};
+  const t = ev.type || "";
+
+  if (t === "tool_call_started") {
+    const el = appendProgressEntry("running", `◷ ${ev.tool}`);
+    progressStack.push({ kind: "tool_call", tool: ev.tool, el });
+    return;
+  }
+  if (t === "tool_call_done") {
+    // A tool can complete without raising but still report ok=false
+    // in its summary (parse error, validation defect, etc.). Render
+    // those as error rows (✗ red), not success rows.
+    const failed = ev.summary && ev.summary.ok === false;
+    const cls = failed ? "error" : "done";
+    const icon = failed ? "✗" : "✓";
+    finalizeMatching("tool_call", ev.tool, cls, `${icon} ${ev.tool}` + summarySuffix(ev.summary));
+    return;
+  }
+  if (t === "tool_call_error") {
+    finalizeMatching("tool_call", ev.tool, "error", `✗ ${ev.tool} — ${truncate(ev.error || "error", 80)}`);
+    return;
+  }
+  if (t === "research_started") {
+    const label = ev.topic || ev.slug || "(unknown)";
+    const el = appendProgressEntry("running", `▸ research(${label})`);
+    progressStack.push({ kind: "research", el });
+    return;
+  }
+  if (t === "research_done") {
+    const label = ev.title || ev.slug || "(done)";
+    const detail = ev.cache_path ? ` → ${ev.cache_path}` : "";
+    finalizeMatching("research", null, "done", `✓ research(${label})${detail}`);
+    return;
+  }
+  if (t === "research_error") {
+    finalizeMatching("research", null, "error", `✗ research — ${truncate(ev.error || "error", 100)}`);
+    return;
+  }
+
+  if (t === "validation_defect") {
+    const cls = ev.severity === "error" ? "error" : "warning";
+    const text = `${ev.severity === "error" ? "✗" : "⚠"} ${ev.where} — expected ${truncate(ev.expected, 40)}, got ${truncate(ev.actual, 40)}`;
+    appendProgressEntry(cls, text);
+    return;
+  }
+  if (t === "validation_pass") {
+    appendProgressEntry("done", `✓ validation passed (${ev.slug})`);
+    return;
+  }
+
+  // Subagent stream chunks: render as nested sub-entries when a research
+  // call is currently active; ignore otherwise (the parent tool_call
+  // events already cover non-research tools).
+  if (progressStack.some((e) => e.kind === "research")) {
+    const text = describeStreamEvent(ev);
+    if (text) appendProgressEntry("sub", `  · ${text}`);
+  }
+}
+
+function appendProgressEntry(statusClass, text) {
+  const el = document.createElement("div");
+  el.className = `progress-entry ${statusClass}`;
+  el.textContent = text;
+  el.dataset.testid = "progress-entry";
+  progressPanel.appendChild(el);
+  progressPanel.scrollTop = progressPanel.scrollHeight;
+  return el;
+}
+
+function finalizeMatching(kind, tool, statusClass, text) {
+  // Pop the topmost matching open entry (LIFO so nested tool_calls
+  // close in the right order).
+  for (let i = progressStack.length - 1; i >= 0; i--) {
+    const entry = progressStack[i];
+    if (entry.kind !== kind) continue;
+    if (tool != null && entry.tool !== tool) continue;
+    progressStack.splice(i, 1);
+    entry.el.classList.remove("running");
+    entry.el.classList.add(statusClass);
+    entry.el.textContent = text;
+    return;
+  }
+  // No matching open entry — emit a new line so the user still sees it.
+  appendProgressEntry(statusClass, text);
+}
+
+function summarySuffix(summary) {
+  if (!summary || typeof summary !== "object") return "";
+  if (summary.added || summary.updated || summary.removed) {
+    const parts = [];
+    if (summary.added && summary.added.length) parts.push(`+${summary.added.join(",")}`);
+    if (summary.updated && summary.updated.length) parts.push(`~${summary.updated.join(",")}`);
+    if (summary.removed && summary.removed.length) parts.push(`-${summary.removed.join(",")}`);
+    if (parts.length) return ` — ${parts.join(" ")}`;
+  }
+  if (summary.cache_path) return ` — ${summary.cache_path}`;
+  if (typeof summary.count === "number") return ` — ${summary.count} entries`;
+  if (summary.ok === false) return ` — error`;
+  return "";
+}
+
+function describeStreamEvent(ev) {
+  if (ev.type === "system") return `init`;
+  if (ev.type === "assistant" && ev.message && Array.isArray(ev.message.content)) {
+    const tool = ev.message.content.find((b) => b.type === "tool_use");
+    if (tool) return `tool: ${tool.name}`;
+    const text = ev.message.content.find((b) => b.type === "text");
+    if (text && text.text) return truncate(text.text, 80);
+  }
+  if (ev.type === "user" && ev.message) return "tool result";
+  if (ev.type === "result") return `result: ${ev.subtype || ""}`.trim();
+  return "";
+}
+
+function truncate(s, n) {
+  if (!s) return "";
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + "…";
+}
+
+function formatToolArgs(args) {
+  // Single-line JSON for short args; for any string field longer than
+  // 120 chars (typically `set_source.text` or `validate.text` dumping
+  // the entire .scad), substitute `<N chars>` so the chat-log stays
+  // scrollable. Mirrors the agent-tools _safe_args truncation.
+  if (!args || typeof args !== "object") return JSON.stringify(args);
+  const trimmed = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (typeof v === "string" && v.length > 120) {
+      trimmed[k] = `<${v.length} chars>`;
+    } else {
+      trimmed[k] = v;
+    }
+  }
+  return JSON.stringify(trimmed);
+}
+
+if (progressClearBtn) {
+  progressClearBtn.addEventListener("click", () => {
+    progressPanel.innerHTML = "";
+    progressStack.length = 0;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Agent status indicator — visual cue for thinking / idle / stuck.
+// Cycles a braille spinner glyph while the agent's working; goes red-pulse
+// when no progress event arrives for 30s.
+// ---------------------------------------------------------------------------
+
+const agentStatus = document.getElementById("agent-status");
+const SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+let spinnerIdx = 0;
+let spinnerInterval = null;
+let stuckTimer = null;
+const STUCK_AFTER_MS = 30000;
+
+function setAgentStatus(state) {
+  if (!agentStatus) return;
+  agentStatus.dataset.state = state;
+  agentStatus.title = `Agent state: ${state}`;
+  if (state === "thinking") {
+    if (!spinnerInterval) {
+      spinnerInterval = setInterval(() => {
+        spinnerIdx = (spinnerIdx + 1) % SPINNER_FRAMES.length;
+        agentStatus.textContent = SPINNER_FRAMES[spinnerIdx];
+      }, 100);
+    }
+  } else {
+    if (spinnerInterval) {
+      clearInterval(spinnerInterval);
+      spinnerInterval = null;
+    }
+    agentStatus.textContent = state === "stuck" ? "⚠" : "●";
+  }
+}
+
+function bumpStuckTimer() {
+  if (stuckTimer) clearTimeout(stuckTimer);
+  stuckTimer = setTimeout(() => {
+    if (agentStatus && agentStatus.dataset.state === "thinking") {
+      setAgentStatus("stuck");
+    }
+  }, STUCK_AFTER_MS);
+}
+
+setAgentStatus("idle");
+
+// Test hook
+if (window.fastcad) {
+  window.fastcad.agentStatus = () => agentStatus ? agentStatus.dataset.state : null;
+}
+
+// ---------------------------------------------------------------------------
+// Resizable chat-log / progress-pane split. Drag the #pane-divider to
+// rebalance; CSS reads --pane-split (a percentage) on #chat-pane.
+// ---------------------------------------------------------------------------
+
+const paneDivider = document.getElementById("pane-divider");
+const chatPane = document.getElementById("chat-pane");
+
+if (paneDivider && chatPane) {
+  let dragging = false;
+  let dragStartY = 0;
+  let dragStartPct = 60;
+
+  function setSplit(pct) {
+    // Clamp so neither pane disappears entirely.
+    const clamped = Math.max(15, Math.min(85, pct));
+    chatPane.style.setProperty("--pane-split", String(clamped));
+    try {
+      localStorage.setItem("fastcad.paneSplit", String(clamped));
+    } catch (_) { /* private mode etc. — ignore */ }
+  }
+
+  // Restore last drag position across reloads.
+  try {
+    const saved = localStorage.getItem("fastcad.paneSplit");
+    if (saved !== null) setSplit(parseFloat(saved));
+  } catch (_) { /* ignore */ }
+
+  function startDrag(ev) {
+    dragging = true;
+    // Anchor the drag at the cursor's current position so the divider
+    // tracks the cursor instead of jumping to wherever (clientY-rect.top)
+    // happens to map. Store initial cursor-Y and the current split %;
+    // subsequent moves apply (cursorY - startY) as a delta in %.
+    dragStartY = ev.clientY;
+    dragStartPct = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split")) || 60;
+    paneDivider.classList.add("dragging");
+    ev.preventDefault();
+    paneDivider.setPointerCapture(ev.pointerId);
+  }
+
+  function moveDrag(ev) {
+    if (!dragging) return;
+    const rect = chatPane.getBoundingClientRect();
+    const deltaPct = ((ev.clientY - dragStartY) / rect.height) * 100;
+    setSplit(dragStartPct + deltaPct);
+  }
+
+  function endDrag(ev) {
+    if (!dragging) return;
+    dragging = false;
+    paneDivider.classList.remove("dragging");
+    try { paneDivider.releasePointerCapture(ev.pointerId); } catch (_) { /* ignore */ }
+  }
+
+  paneDivider.addEventListener("pointerdown", startDrag);
+  paneDivider.addEventListener("pointermove", moveDrag);
+  paneDivider.addEventListener("pointerup", endDrag);
+  paneDivider.addEventListener("pointercancel", endDrag);
+
+  // Keyboard accessibility: arrow up/down nudges the split by 5%.
+  paneDivider.addEventListener("keydown", (ev) => {
+    const cur = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split")) || 60;
+    if (ev.key === "ArrowUp") { setSplit(cur - 5); ev.preventDefault(); }
+    else if (ev.key === "ArrowDown") { setSplit(cur + 5); ev.preventDefault(); }
+  });
 }
 
 function exportScad(source) {
@@ -255,12 +583,22 @@ chatForm.addEventListener("submit", (ev) => {
   addMessage("user", text);
   send({ type: "prompt", text });
   chatInput.value = "";
+  setAgentStatus("thinking");
+  bumpStuckTimer();
 });
 
 document.getElementById("undo-btn").addEventListener("click", () => send({ type: "undo" }));
 document.getElementById("redo-btn").addEventListener("click", () => send({ type: "redo" }));
 document.getElementById("export-btn").addEventListener("click", () => send({ type: "export_scad" }));
 document.getElementById("reset-btn").addEventListener("click", () => send({ type: "reset" }));
+const homeBtn = document.getElementById("home-btn");
+if (homeBtn) homeBtn.addEventListener("click", recenterCamera);
+
+// Keyboard: 'h' to recenter (when canvas has focus)
+window.addEventListener("keydown", (ev) => {
+  if (ev.target instanceof HTMLInputElement) return;  // don't steal chat input
+  if (ev.key === "h" || ev.key === "H") recenterCamera();
+});
 
 // ---------------------------------------------------------------------------
 // Hooks for feedback.js + e2e tests
@@ -272,6 +610,8 @@ window.fastcad.renderer = renderer;
 window.fastcad.meshMap = meshMap;
 window.fastcad.wsLog = wsLog;
 window.fastcad.send = send;
+window.fastcad.progressPanel = progressPanel;
+window.fastcad.progressEntryCount = () => progressPanel.querySelectorAll(".progress-entry").length;
 window.fastcad.snapshotViewer = () => renderer.domElement.toDataURL("image/png");
 window.fastcad.cameraState = () => ({
   position: camera.position.toArray(),
