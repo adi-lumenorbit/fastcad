@@ -209,39 +209,16 @@ count fixes this.**
 sweep through `r_minor → r_major → r_minor` over a full 360° of
 azimuth. When extruded with `twist = 360°·length/pitch` (one full
 rotation per pitch), this generates a real sawtooth thread profile
-in any axial section. Use a polygon with N points around the full
-circle, where r varies as a triangle wave:
-
-```
-module thread_xs() {
-  // r(θ) varies between r_minor (at θ=0, 360°) and r_major (at θ=180°).
-  // Linear extrude with twist = 360°·length/pitch sweeps this profile
-  // along z, producing single-start sawtooth threads with proper
-  // axial extent.
-  $fn = 96;   // local-only; N points around the lobed cross-section
-  N = 96;
-  polygon([
-    // Vertex i at angle 360°·i/N, radius r_min + (r_max-r_min)·t,
-    // where t = triangle wave: 0 at i=0, 1 at i=N/2, 0 at i=N.
-    // Emit each vertex with a constant expression — no list compr.
-    // (See Implementation note: parser doesn't support [for(...)..].)
-  ]);
-}
-```
+in any axial section.
 
 > **Parser note.** This subset of OpenSCAD does NOT support list
 > comprehensions inside expressions. You cannot write
-> `polygon([for (i = [0:N]) [r·cos(θ), r·sin(θ)]])`. Two workarounds:
->
-> 1. **`union()` of `for` over many `polygon()` triangles** — build
->    the lobed cross-section as a fan of triangles from the origin,
->    iterating with `for (i = [0:N-1]) polygon([...])` inside a
->    `union()` block.
-> 2. **`polyhedron(points=[...], faces=[...])`** with vertex/face
->    lists computed externally and pasted in. Reliable but verbose;
->    only viable for small N. For threads, prefer (1).
+> `polygon([for (i = [0:N]) [r·cos(θ), r·sin(θ)]])`. Build the
+> lobed cross-section as a `union()` of `for`-iterated triangle
+> `polygon()`s from the origin to consecutive `(r₀, θ₀) → (r₁, θ₁)`
+> pairs on the lobe — see worked code below.
 
-A worked construction using approach (1):
+Worked construction:
 
 ```
 N = 96;

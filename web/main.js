@@ -499,6 +499,8 @@ const chatPane = document.getElementById("chat-pane");
 
 if (paneDivider && chatPane) {
   let dragging = false;
+  let dragStartY = 0;
+  let dragStartPct = 60;
 
   function setSplit(pct) {
     // Clamp so neither pane disappears entirely.
@@ -517,6 +519,12 @@ if (paneDivider && chatPane) {
 
   function startDrag(ev) {
     dragging = true;
+    // Anchor the drag at the cursor's current position so the divider
+    // tracks the cursor instead of jumping to wherever (clientY-rect.top)
+    // happens to map. Store initial cursor-Y and the current split %;
+    // subsequent moves apply (cursorY - startY) as a delta in %.
+    dragStartY = ev.clientY;
+    dragStartPct = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split")) || 60;
     paneDivider.classList.add("dragging");
     ev.preventDefault();
     paneDivider.setPointerCapture(ev.pointerId);
@@ -525,9 +533,8 @@ if (paneDivider && chatPane) {
   function moveDrag(ev) {
     if (!dragging) return;
     const rect = chatPane.getBoundingClientRect();
-    const offsetY = ev.clientY - rect.top;
-    const pct = (offsetY / rect.height) * 100;
-    setSplit(pct);
+    const deltaPct = ((ev.clientY - dragStartY) / rect.height) * 100;
+    setSplit(dragStartPct + deltaPct);
   }
 
   function endDrag(ev) {
