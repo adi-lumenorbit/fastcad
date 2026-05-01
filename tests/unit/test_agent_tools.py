@@ -92,6 +92,86 @@ def test_dispatch_unknown_tool():
     assert "error" in res.content
 
 
+def test_dispatch_inspect_section_axis_aligned():
+    s = _fresh()
+    s.set_source("cylinder(h = 10, r = 3, $fn = 32);")
+    res = dispatch("inspect_section", {"plane": "XY", "offset": 5.0}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is True
+    metrics = payload["metrics"]
+    assert metrics["plane_label"] == "XY@z=5"
+    # XY section of a cylinder: smooth ring, no protrusions.
+    assert metrics["radial"]["outer_protrusions"] == 0
+    # Polygons returned by default.
+    assert payload["polygons"]
+
+
+def test_dispatch_inspect_section_axial_returns_axial_peaks():
+    s = _fresh()
+    s.set_source("cylinder(h = 10, r = 3, $fn = 32);")
+    res = dispatch("inspect_section", {"plane": "XZ", "offset": 0.0}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is True
+    assert "axial_peaks" in payload["metrics"]
+    # Smooth cylinder has no thread peaks.
+    assert payload["metrics"]["axial_peaks"]["count"] == 0
+
+
+def test_dispatch_inspect_section_oblique():
+    s = _fresh()
+    s.set_source("cube([10, 10, 10], center = true);")
+    res = dispatch(
+        "inspect_section",
+        {"plane": "oblique", "normal": [1, 0, 1], "point": [0, 0, 0]},
+        s,
+    )
+    payload = json.loads(res.content)
+    assert payload["ok"] is True
+    # Diagonal section through cube: bbox spans the diagonal.
+    bb = payload["metrics"]["bbox_2d"]
+    assert bb["umax"] - bb["umin"] >= 9.5
+    assert bb["vmax"] - bb["vmin"] >= 13.0  # 10 * sqrt(2)
+
+
+def test_dispatch_inspect_section_no_geometry():
+    s = _fresh()
+    res = dispatch("inspect_section", {"plane": "XY", "offset": 0.0}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is False
+    assert "no 3D geometry" in payload["error"]
+
+
+def test_dispatch_inspect_section_bad_plane():
+    s = _fresh()
+    s.set_source("cube([5, 5, 5]);")
+    res = dispatch("inspect_section", {"plane": "ABC"}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is False
+    assert "ABC" in payload["error"] or "unknown plane" in payload["error"].lower()
+
+
+def test_dispatch_inspect_section_oblique_requires_normal():
+    s = _fresh()
+    s.set_source("cube([5, 5, 5]);")
+    res = dispatch("inspect_section", {"plane": "oblique"}, s)
+    payload = json.loads(res.content)
+    assert payload["ok"] is False
+    assert "normal" in payload["error"].lower()
+
+
+def test_dispatch_inspect_section_skip_polygons():
+    s = _fresh()
+    s.set_source("cube([5, 5, 5]);")
+    res = dispatch(
+        "inspect_section",
+        {"plane": "XY", "offset": 0.0, "include_polygons": False},
+        s,
+    )
+    payload = json.loads(res.content)
+    assert payload["ok"] is True
+    assert "polygons" not in payload
+
+
 # ---- fake-mode patterns ---------------------------------------------------
 
 
