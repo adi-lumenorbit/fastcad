@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -34,6 +35,59 @@ from typing import Callable, Iterator
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = _REPO_ROOT / "docs" / "research"
 DEFAULT_REPO_ROOT = _REPO_ROOT
+
+
+# --- Input sanitization ----------------------------------------------------
+
+# Slugs are filenames in `docs/research/`. We enforce a strict kebab-case
+# regex so user-controlled input can never produce path-traversal
+# (`../etc/passwd`), hidden files (`.bashrc`), or filenames the OS treats
+# specially. The cap of 64 chars is well above any reasonable part name.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+# Topic strings are passed to the subagent verbatim and embedded in the
+# user prompt. We bound the size and strip control characters so a
+# pathological topic can't blow the subagent's context or smuggle ANSI
+# escape sequences into the spawn command's argv.
+_MAX_TOPIC_LEN = 200
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+class InvalidSlugError(ValueError):
+    """The slug failed the kebab-case whitelist."""
+
+
+class InvalidTopicError(ValueError):
+    """The research topic exceeded length limits or held control chars."""
+
+
+def validate_slug(slug: str) -> str:
+    """Return the slug unchanged if it matches the whitelist; otherwise
+    raise InvalidSlugError. Use at every entry point that takes a
+    user-controlled slug."""
+    if not isinstance(slug, str) or not _SLUG_RE.match(slug):
+        raise InvalidSlugError(
+            f"slug {slug!r} must match {_SLUG_RE.pattern} "
+            f"(kebab-case, lowercase, ≤64 chars, no path separators)"
+        )
+    return slug
+
+
+def sanitize_topic(topic: str) -> str:
+    """Strip control characters, collapse runs of whitespace, and
+    enforce the length cap. Raises InvalidTopicError on empty or
+    over-long input."""
+    if not isinstance(topic, str):
+        raise InvalidTopicError("topic must be a string")
+    cleaned = _CONTROL_CHARS_RE.sub("", topic).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned:
+        raise InvalidTopicError("topic is empty after sanitization")
+    if len(cleaned) > _MAX_TOPIC_LEN:
+        raise InvalidTopicError(
+            f"topic length {len(cleaned)} exceeds cap {_MAX_TOPIC_LEN}"
+        )
+    return cleaned
 
 
 # --- Subagent system-prompt directive --------------------------------------
@@ -162,9 +216,24 @@ def list_research(cache_dir: Path | None = None) -> list[CacheEntry]:
 
 
 def read_research(slug: str, cache_dir: Path | None = None) -> str | None:
-    """Return the full markdown content for a slug, or None if missing."""
+    """Return the full markdown content for a slug, or None if missing.
+    Slug must pass the whitelist; otherwise returns None (treat as
+    missing — same shape the agent already handles)."""
     cd = cache_dir or DEFAULT_CACHE_DIR
+    try:
+        validate_slug(slug)
+    except InvalidSlugError:
+        return None
     p = cd / f"{slug}.md"
+    # Defence in depth: confirm the resolved path is still inside cd.
+    # validate_slug already prevents `..`, but resolving guards against
+    # symlink shenanigans if cache_dir contains a malicious entry.
+    try:
+        p_resolved = p.resolve(strict=False)
+        cd_resolved = cd.resolve(strict=False)
+        p_resolved.relative_to(cd_resolved)
+    except (OSError, ValueError):
+        return None
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
@@ -217,6 +286,13 @@ def run_research(
     """
     cd = cache_dir or DEFAULT_CACHE_DIR
     rr = repo_root or DEFAULT_REPO_ROOT
+
+    # Sanitize user-controlled inputs before they reach the subprocess
+    # spawn or the cache filesystem. Both raise on bad input — caller
+    # surfaces as a tool error.
+    topic = sanitize_topic(topic)
+    if slug is not None:
+        validate_slug(slug)
 
     # Cache hit — short-circuit.
     if slug:

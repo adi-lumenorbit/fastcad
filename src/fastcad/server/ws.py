@@ -16,15 +16,83 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 from ..agent.client import AgentTurn, _reset_fake, run_turn
 from ..model import kernel as k
 from ..session import SessionState
+
+
+# --- Input hardening ------------------------------------------------------
+
+# Hard cap on a single inbound WS frame (bytes). Anything larger is
+# certainly not a legitimate prompt; refuse before trying to parse JSON.
+_MAX_FRAME_BYTES = 64 * 1024  # 64 KB
+
+# Cap on the user-facing prompt text. Generous enough for verbose
+# requirements; tight enough that a flood of huge prompts can't drain
+# tokens in seconds.
+_MAX_PROMPT_CHARS = 4096
+
+# Whitelist of inbound message types. Anything else is rejected without
+# being dispatched. This is the single place where new WS verbs land.
+_ALLOWED_TYPES = frozenset({
+    "prompt",
+    "user_choice",
+    "undo",
+    "redo",
+    "reset",
+    "export_scad",
+    "ws_log_request",
+})
+
+# Per-session prompt rate limits. Token-bucket with two windows: a burst
+# allowance (10 prompts in 60 s) and a daily ceiling (200 prompts in
+# 24 h). The daily ceiling is the real cost backstop — at typical
+# token usage the API spend cap on the key still dominates, but this
+# gives us cheap, in-process protection.
+_RATE_BURST_WINDOW_S = 60.0
+_RATE_BURST_MAX = 10
+_RATE_DAILY_WINDOW_S = 86400.0
+_RATE_DAILY_MAX = 200
+
+
+def _allowed_origins() -> set[str]:
+    """Origins permitted to open a WebSocket connection. Defaults to
+    same-origin (empty set means "no Origin header check"). Set
+    `FASTCAD_ALLOWED_ORIGINS` to a comma-separated list of full
+    origins (e.g. "https://fastcad.example.com") to lock the WS to
+    your deployed hostname only."""
+    raw = os.environ.get("FASTCAD_ALLOWED_ORIGINS", "").strip()
+    if not raw:
+        return set()
+    return {o.strip().rstrip("/") for o in raw.split(",") if o.strip()}
+
+
+def _origin_ok(ws: WebSocket) -> bool:
+    """Return True if the WS handshake's Origin header is permitted.
+    Empty allow-list ⇒ always allow (single-user local mode).
+    Origin missing ⇒ allow only when allow-list is empty."""
+    allowed = _allowed_origins()
+    if not allowed:
+        return True
+    origin = (ws.headers.get("origin") or "").strip().rstrip("/")
+    if not origin:
+        return False
+    # Tolerate `https://host:443` vs `https://host` by parsing.
+    try:
+        parsed = urlsplit(origin)
+        canonical = f"{parsed.scheme}://{parsed.netloc}"
+    except ValueError:
+        return False
+    return canonical in allowed
 
 
 @dataclass
@@ -35,6 +103,34 @@ class WSContext:
     ws_log: list[dict] = field(default_factory=list)  # outbound + inbound for feedback bundles
     progress_seq: int = 0
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Per-session timestamps of accepted prompts (oldest first). Used
+    # by the rate limiter; bounded by `_RATE_DAILY_MAX` entries.
+    prompt_times: deque[float] = field(default_factory=deque)
+
+
+def _check_rate_limit(ctx: WSContext) -> str | None:
+    """Return None when a new prompt is allowed, or a human-readable
+    reason string when blocked. On allow, the function records the
+    timestamp."""
+    now = time.monotonic()
+    # Drop entries outside the daily window.
+    while ctx.prompt_times and now - ctx.prompt_times[0] > _RATE_DAILY_WINDOW_S:
+        ctx.prompt_times.popleft()
+    # Burst window: count entries within the last RATE_BURST_WINDOW_S.
+    burst_count = sum(1 for t in ctx.prompt_times
+                      if now - t <= _RATE_BURST_WINDOW_S)
+    if burst_count >= _RATE_BURST_MAX:
+        return (
+            f"rate limit: max {_RATE_BURST_MAX} prompts per "
+            f"{int(_RATE_BURST_WINDOW_S)} s on this connection"
+        )
+    if len(ctx.prompt_times) >= _RATE_DAILY_MAX:
+        return (
+            f"rate limit: daily cap of {_RATE_DAILY_MAX} prompts "
+            f"reached on this connection"
+        )
+    ctx.prompt_times.append(now)
+    return None
 
 
 def _node_payload(ctx: WSContext, node_id: str) -> dict:
@@ -192,17 +288,43 @@ async def _run_turn_streaming(
 
 async def handle(ws: WebSocket) -> None:
     ctx = WSContext()
+    # Origin check: reject cross-site WebSocket hijacking before we
+    # even accept the handshake. Local single-user mode is preserved
+    # by leaving the allow-list empty (FASTCAD_ALLOWED_ORIGINS unset).
+    if not _origin_ok(ws):
+        await ws.close(code=1008, reason="origin not allowed")
+        return
     await ws.accept()
     await _send(ws, ctx, _scene_init(ctx))
     try:
         while True:
             raw = await ws.receive_text()
+            # Reject oversized frames before paying the JSON-parse cost.
+            if len(raw) > _MAX_FRAME_BYTES:
+                await _send(ws, ctx, {
+                    "type": "error",
+                    "message": f"message too large ({len(raw)} > {_MAX_FRAME_BYTES} bytes)",
+                })
+                continue
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 await _send(ws, ctx, {"type": "error", "message": "invalid json"})
                 continue
-            ctx.ws_log.append({"dir": "in", "t": time.time(), "type": msg.get("type"), "msg": msg})
+            if not isinstance(msg, dict):
+                await _send(ws, ctx, {
+                    "type": "error",
+                    "message": "message must be a JSON object",
+                })
+                continue
+            typ = msg.get("type")
+            if typ not in _ALLOWED_TYPES:
+                await _send(ws, ctx, {
+                    "type": "error",
+                    "message": f"unknown or disallowed type: {typ!r}",
+                })
+                continue
+            ctx.ws_log.append({"dir": "in", "t": time.time(), "type": typ, "msg": msg})
             await _dispatch(ws, ctx, msg)
     except WebSocketDisconnect:
         return
@@ -211,14 +333,44 @@ async def handle(ws: WebSocket) -> None:
 async def _dispatch(ws: WebSocket, ctx: WSContext, msg: dict[str, Any]) -> None:
     typ = msg.get("type")
     if typ == "prompt":
-        text = str(msg.get("text", ""))
+        text = _clean_prompt_text(msg.get("text"))
+        if text is None:
+            await _send(ws, ctx, {
+                "type": "error",
+                "message": f"prompt rejected: must be 1..{_MAX_PROMPT_CHARS} chars after sanitization",
+            })
+            return
+        blocked = _check_rate_limit(ctx)
+        if blocked is not None:
+            await _send(ws, ctx, {"type": "error", "message": blocked})
+            return
         turn = await _run_turn_streaming(ws, ctx, text)
         if turn is not None:
             await _emit_turn(ws, ctx, turn)
         return
     if typ == "user_choice":
-        # User picked an option from the previous ask_user.
+        # User picked an option from the previous ask_user. We only
+        # accept a choice when there's a pending ask AND the choice
+        # text matches one of the offered options — prevents arbitrary
+        # text from sneaking in via a stale or forged user_choice.
         text = str(msg.get("text", ""))
+        if ctx.pending_ask is None:
+            await _send(ws, ctx, {
+                "type": "error",
+                "message": "user_choice without a pending ask_user",
+            })
+            return
+        options = ctx.pending_ask.get("options") or []
+        if text not in options:
+            await _send(ws, ctx, {
+                "type": "error",
+                "message": "user_choice must match one of the offered options",
+            })
+            return
+        blocked = _check_rate_limit(ctx)
+        if blocked is not None:
+            await _send(ws, ctx, {"type": "error", "message": blocked})
+            return
         turn = await _run_turn_streaming(ws, ctx, text)
         if turn is not None:
             await _emit_turn(ws, ctx, turn)
@@ -248,3 +400,27 @@ async def _dispatch(ws: WebSocket, ctx: WSContext, msg: dict[str, Any]) -> None:
         await _send(ws, ctx, {"type": "ws_log", "log": list(ctx.ws_log[-200:])})
         return
     await _send(ws, ctx, {"type": "error", "message": f"unknown type: {typ}"})
+
+
+# --- Prompt sanitization ---------------------------------------------------
+
+# Strip ASCII control characters except whitespace (LF / CR / TAB).
+# Anything else in 0x00-0x1f / 0x7f is most likely an injection attempt
+# (ANSI escapes, NUL bytes for log poisoning, etc.) and never appears in
+# legitimate user prose.
+import re as _re  # imported here to keep the module-top imports tidy
+_PROMPT_CONTROL_RE = _re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _clean_prompt_text(raw: Any) -> str | None:
+    """Sanitize a user-supplied prompt string. Returns None when the
+    payload is the wrong type, is empty after stripping, or exceeds
+    the max-prompt cap. Caller surfaces None as a protocol error."""
+    if not isinstance(raw, str):
+        return None
+    cleaned = _PROMPT_CONTROL_RE.sub("", raw).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > _MAX_PROMPT_CHARS:
+        return None
+    return cleaned

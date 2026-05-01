@@ -411,6 +411,13 @@ def _dispatch_inner(
 
     if name == "read_research":
         slug = str(args.get("slug", ""))
+        try:
+            _research.validate_slug(slug)
+        except _research.InvalidSlugError as exc:
+            return ToolResult(content=json.dumps({
+                "ok": False,
+                "error": f"invalid slug: {exc}",
+            }))
         content = _research.read_research(slug)
         if content is None:
             return ToolResult(content=json.dumps({
@@ -451,9 +458,15 @@ def _dispatch_inner(
         topic = str(args.get("topic", ""))
         slug = args.get("slug")
         slug = str(slug) if slug else None
-        result = _research.run_research(
-            topic, slug=slug, on_progress=on_progress
-        )
+        try:
+            result = _research.run_research(
+                topic, slug=slug, on_progress=on_progress
+            )
+        except (_research.InvalidSlugError, _research.InvalidTopicError) as exc:
+            return ToolResult(content=json.dumps({
+                "ok": False,
+                "error": f"invalid input: {exc}",
+            }))
         return ToolResult(content=json.dumps(result.to_dict()))
 
     if name == "inspect_section":
