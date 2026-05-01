@@ -1,0 +1,94 @@
+# Caddy 2 config for the deployed fastcad VM.
+#
+# - One global TLS host with automatic Let's Encrypt cert.
+# - basic_auth for the entry point (single shared user).
+# - Per-IP rate limit (requires the `mholt/caddy-ratelimit` module —
+#   bootstrap.sh installs caddy with this module via xcaddy).
+# - WebSocket reverse-proxied to fastcad on 127.0.0.1:8765.
+# - Hardening headers and a strict CSP.
+#
+# Replace `__HOST__` and `__BCRYPT_HASH__` at deploy time —
+# bootstrap.sh does the substitution after generating the password.
+
+{
+	# Email used by Let's Encrypt for renewal notices.
+	email __ACME_EMAIL__
+
+	servers {
+		# Tight read timeouts; long idle for live WebSocket sessions.
+		timeouts {
+			read_body   10s
+			read_header 10s
+			write       60s
+			idle        30m
+		}
+	}
+}
+
+__HOST__ {
+	encode zstd gzip
+
+	# Reject anything bigger than 2 MB upfront. Legitimate prompts +
+	# feedback bundles fit comfortably under this; the agent's WS
+	# frames are individually capped server-side too.
+	request_body {
+		max_size 2MB
+	}
+
+	# Rate limits — burst (per-second) and sustained (per-minute).
+	# Per-IP keyspace; identifies repeat offenders even behind NAT
+	# at second-scale.
+	rate_limit {
+		zone burst {
+			key    {client_ip}
+			events 30
+			window 10s
+		}
+		zone sustained {
+			key    {client_ip}
+			events 600
+			window 1h
+		}
+	}
+
+	# Hardening headers. Strict CSP forbids any third-party origin
+	# and inline script; our /vendor/ libs are same-origin so this
+	# fits the existing app without changes.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options             "DENY"
+		X-Content-Type-Options      "nosniff"
+		Referrer-Policy             "same-origin"
+		Permissions-Policy          "geolocation=(), camera=(), microphone=()"
+		Content-Security-Policy     "default-src 'self'; img-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		# Don't advertise the server.
+		-Server
+	}
+
+	# Single shared user / bcrypt-hashed password. Generate the hash
+	# with `caddy hash-password`. Username MUST match what fastcad's
+	# WS layer expects (any string fine — Caddy enforces the auth).
+	basic_auth /* {
+		__USER__ __BCRYPT_HASH__
+	}
+
+	# Reverse-proxy everything (HTTP + WS upgrades) to fastcad on
+	# loopback. The app binds 127.0.0.1, so Caddy is the only path in.
+	reverse_proxy 127.0.0.1:8765 {
+		# Forward the auth-stripped WS upgrade with the original IP
+		# in X-Forwarded-* so app-level rate limiting can use it.
+		header_up X-Real-IP        {client_ip}
+		header_up X-Forwarded-For  {client_ip}
+		header_up X-Forwarded-Host {host}
+	}
+
+	# Caddy access log → stable file fail2ban can tail.
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10MiB
+			roll_keep 7
+			roll_keep_for 168h
+		}
+		format json
+	}
+}

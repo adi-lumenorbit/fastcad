@@ -1,0 +1,81 @@
+[Unit]
+Description=fastcad — AI-driven incremental 3D modeler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=fastcad
+Group=fastcad
+WorkingDirectory=/opt/fastcad
+
+# Secrets live in this file with mode 0600 owned by fastcad:fastcad.
+# bootstrap.sh creates it from .env.template and prompts for the API key.
+EnvironmentFile=/etc/fastcad/fastcad.env
+
+# Bind to loopback only — Caddy is the only external entry point.
+# `--no-reload` is mandatory: the production unit must not auto-restart
+# on filesystem changes (it would reset session state and burn budget).
+ExecStart=/opt/fastcad/.venv/bin/python -m fastcad --host 127.0.0.1 --port 8765
+
+# Lock the WS to the deployed origin (set by bootstrap.sh).
+Environment="FASTCAD_AUTO_VALIDATE=structural+vision"
+
+# --- Sandboxing -----------------------------------------------------------
+# Drop every capability except what the app actually needs (none — pure
+# userland). Restrict syscall classes, kernel surfaces, and namespaces.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# Only these directories are writable to the unit. tmp/ holds research
+# bundles, sections debug, feedback bundles. docs/research/ is the
+# subagent's only legitimate write target.
+ReadWritePaths=/opt/fastcad/tmp /opt/fastcad/docs/research
+
+# Strip filesystem capabilities entirely.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Constrain syscall surface to what a typical service needs — denies
+# things like @clock, @debug, @module, @mount, @raw-io, @reboot.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# Hard resource caps. The agent + OpenSCAD CLI + research subagent all
+# fit under 2 GB at typical workloads. CPU 80 % keeps the host
+# responsive even under a runaway loop. TasksMax stops fork-bomb-style
+# subprocess explosions; LimitNOFILE caps file descriptors.
+MemoryMax=2G
+CPUQuota=80%
+TasksMax=256
+LimitNOFILE=1024
+
+# Restart on crash, but throttle to avoid hot-loop on a fatal config bug.
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+# Stream stdout/stderr to journald so `journalctl -u fastcad` works.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

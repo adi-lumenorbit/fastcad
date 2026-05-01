@@ -1,0 +1,4 @@
+# /etc/cron.d/fastcad-cleanup
+# Prune research / section / feedback bundles older than 7 days, weekly.
+# Runs as `fastcad` so it can only touch its own paths.
+13 4 * * 0  fastcad  /usr/bin/find /opt/fastcad/tmp -mindepth 1 -mtime +7 -delete >/dev/null 2>&1

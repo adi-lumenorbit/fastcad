@@ -1,0 +1,25 @@
+# /etc/fail2ban/jail.local — installed by bootstrap.sh.
+# Two jails:
+#   1. caddy-auth: bans IPs after repeated 401s (basic_auth brute force).
+#   2. sshd     : default jail with tighter ban time.
+
+[DEFAULT]
+# IP gets banned after `maxretry` failures within `findtime`.
+findtime  = 600
+bantime   = 3600
+# Trust loopback and the host's own private IP space.
+ignoreip  = 127.0.0.1/8 ::1
+
+[sshd]
+enabled  = true
+port     = ssh
+maxretry = 3
+bantime  = 86400
+
+[caddy-auth]
+enabled  = true
+filter   = caddy-auth
+backend  = auto
+logpath  = /var/log/caddy/access.log
+maxretry = 5
+bantime  = 3600
