@@ -514,11 +514,11 @@ def _check_axial_consistency(primary: ModuleEval, schema: dict) -> list[Defect]:
     flag stacked-rings.
 
     **Slice-z trap fix**: when `pitch` is provided in the schema, this
-    function adds an offset to each slice z so they land on
-    non-integer-pitch fractions (e.g. {0.27, 0.61, 0.83} of pitch).
-    Without that offset, slice z's at integer multiples of pitch
-    always give the same peak azimuth (every full turn lands the
-    cross-section back at its starting orientation) — false-positive
+    function perturbs each slice z by a *different* irrational fraction
+    of pitch so consecutive sample points don't land at the same
+    azimuth. Without this, slice z's at uniform spacing always give
+    the same peak azimuth (Δz integer-multiple of pitch ⇒ azimuth
+    advances by a full turn back to the start) — false-positive
     flagging valid threads.
     """
     mode = schema.get("axial_consistency")
@@ -528,15 +528,19 @@ def _check_axial_consistency(primary: ModuleEval, schema: dict) -> list[Defect]:
     if len(slices) < 2:
         return []
     pitch = schema.get("pitch")
-    # Use a fixed irrational-ish offset that's guaranteed not to be a
-    # rational fraction of pitch with small denominator. 0.27·pitch
-    # works for any pitch value.
-    z_offset = 0.27 * float(pitch) if pitch is not None else 0.0
+    # Per-slice offsets, fractions of pitch. Each is chosen so that
+    # the resulting Δz between any two slices is NOT an integer
+    # multiple of pitch — so the resulting azimuths spread instead
+    # of stacking. Cycles through this list if there are more slices
+    # than entries.
+    offset_fractions = (0.27, 0.61, 0.83, 0.13, 0.41, 0.73)
     azimuths: list[float] = []
-    for spec in slices:
+    for i, spec in enumerate(slices):
         if not isinstance(spec, dict) or "z" not in spec:
             continue
-        z = float(spec["z"]) + z_offset
+        offset = (offset_fractions[i % len(offset_fractions)] * float(pitch)
+                  if pitch is not None else 0.0)
+        z = float(spec["z"]) + offset
         cs = _slice_at_z(primary.manifold, z)
         if cs is None or cs.is_empty():
             continue

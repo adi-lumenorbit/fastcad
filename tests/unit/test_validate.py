@@ -312,6 +312,46 @@ def test_axial_consistency_helical_passes_for_helix():
     assert axial == []
 
 
+def test_axial_consistency_passes_when_pitch_offsets_break_alignment():
+    """The slice-z trap: if z-values are uniform integer multiples of
+    pitch, peak azimuths stack at the same angle even on a real helix.
+    The per-slice `offset_fractions` table breaks the alignment so
+    valid helices pass even when the schema's z's are pitch-aligned."""
+    src = """
+        $fn = 64;
+        module thread_xs() {
+          union() {
+            circle(r = 1.0);
+            translate([1.0, 0, 0])
+              polygon([[0, -0.1], [0.3, 0], [0, 0.1]]);
+          }
+        }
+        module helix() {
+          linear_extrude(height = 5, twist = -1800, slices = 256)
+            thread_xs();
+        }
+        helix();
+    """
+    ast, ec = _eval_cache(src)
+    # Z values 1, 2, 3, 4 are exactly 1 pitch apart — without the
+    # per-slice offset fix, every sample lands at the same azimuth.
+    md = _cache(
+        '{"axial_consistency": "helical", "pitch": 1.0,'
+        ' "horizontal_slices_at_z": ['
+        '{"z": 1.0, "outer_protrusions": 1},'
+        '{"z": 2.0, "outer_protrusions": 1},'
+        '{"z": 3.0, "outer_protrusions": 1},'
+        '{"z": 4.0, "outer_protrusions": 1}'
+        ']}'
+    )
+    defects = validate_against_cache(ast, md, ec)
+    axial = [d for d in defects if d.where == "axial_consistency"]
+    assert axial == [], (
+        f"expected no axial_consistency defect on a real helix with the "
+        f"slice-z trap fix in place; got {axial}"
+    )
+
+
 def test_axial_consistency_helical_fails_for_stacked_rings():
     """Stacked-rings: every horizontal slice has its protrusion at
     the same azimuth. The agent's geometry from the user's
