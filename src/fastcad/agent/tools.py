@@ -481,7 +481,7 @@ def _run_structural_validation(
     if run_vision is None:
         run_vision = "vision" in os.environ.get("FASTCAD_AUTO_VALIDATE", "")
     if run_vision:
-        from . import critic as _critic
+        from . import critics as _critics
         primary = max(
             (me for me in session.cache.values() if me.manifold is not None),
             key=lambda me: float(me.manifold.volume()),
@@ -490,7 +490,7 @@ def _run_structural_validation(
         if primary is not None and primary.bbox is not None:
             bb = primary.bbox
             bbox = (bb.xmin, bb.ymin, bb.zmin, bb.xmax, bb.ymax, bb.zmax)
-            vision_defects = _critic.review(
+            vision_defects = _critics.review_all(
                 session.current_source,
                 cache_md,
                 user_prompt or "",
