@@ -24,10 +24,18 @@ from __future__ import annotations
 
 import concurrent.futures as _futures
 import os
+import time
+from pathlib import Path
 from typing import Any, Callable
 
 from ...model.render import Render, persist_renders, render_scad_source
+from ...model.sections import (
+    canonical_sections,
+    render_section_png,
+    section_metrics_dict,
+)
 from ...model.validate import Defect
+from ._common import SectionImage
 
 from . import fixit as _fixit
 from . import general as _general
@@ -127,12 +135,20 @@ def review_all(
     persist_slug: str | None = None,
     only: list[str] | None = None,
     prior_defects: list[list[dict]] | None = None,
+    primary_manifold: Any | None = None,
 ) -> list[Defect]:
     """Render once, dispatch all enabled critics in parallel, merge
     defects.
 
     Renders are produced once (expensive) and shared across critics —
     every critic sees the same canonical-angle PNGs.
+
+    When `primary_manifold` is supplied, canonical 2D cross-sections
+    (XZ, YZ, three XY radials) are extracted, rasterised to PNGs, and
+    appended to every critic's multimodal call alongside the iso
+    renders. The cross-sections are the deterministic-feedback channel
+    that catches paper-thin threads, inverted profiles, and other 3D
+    blind spots.
     """
     if on_progress is not None:
         on_progress({"type": "critics_started", "names": only or enabled_critics()})
@@ -157,6 +173,27 @@ def review_all(
 
     if persist_slug:
         persist_renders(renders, persist_slug)
+
+    # Generate canonical 2D cross-sections for every critic to consume.
+    # Failures here are non-fatal: critics still run on the iso renders.
+    section_images: list[SectionImage] = []
+    if primary_manifold is not None:
+        try:
+            section_images = _build_section_images(
+                primary_manifold, persist_slug=persist_slug
+            )
+            if on_progress is not None:
+                on_progress({
+                    "type": "critics_sections_ready",
+                    "count": len(section_images),
+                    "labels": [s.label for s in section_images],
+                })
+        except Exception as exc:  # noqa: BLE001
+            if on_progress is not None:
+                on_progress({
+                    "type": "critics_sections_error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
 
     # Decide which critics fire this iteration.
     #  - The fix-it critic ONLY runs when persistence is detected
@@ -185,6 +222,7 @@ def review_all(
                 renders=renders,
                 client=client,
                 directive=critic.directive,
+                sections=section_images,
             )
             # The fix-it critic needs prior_defects in escalation
             # mode to compose its directive. Other critics ignore
@@ -236,6 +274,41 @@ def _default_client():
     from anthropic import Anthropic
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     return Anthropic(api_key=api_key) if api_key else Anthropic()
+
+
+def _build_section_images(
+    manifold: Any,
+    *,
+    persist_slug: str | None = None,
+) -> list[SectionImage]:
+    """Extract canonical sections + render to PNG. When the
+    `FASTCAD_SECTION_DEBUG` env var is set (or a `persist_slug` is
+    provided), also dump a copy of each PNG under
+    `tmp/sections/<slug>-<ts>/` for human inspection."""
+    sections = canonical_sections(manifold)
+    images: list[SectionImage] = []
+    for sec in sections:
+        png = render_section_png(sec)
+        metrics = section_metrics_dict(sec)
+        images.append(SectionImage(label=sec.plane_label, png_bytes=png, metrics=metrics))
+
+    debug_dump = (
+        os.environ.get("FASTCAD_SECTION_DEBUG") == "1"
+        or persist_slug is not None
+    )
+    if debug_dump and images:
+        repo_root = Path(__file__).resolve().parents[3]
+        slug = persist_slug or "session"
+        out_dir = repo_root / "tmp" / "sections" / f"{slug}-{time.strftime('%Y%m%dT%H%M%S')}"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for s in images:
+                safe = s.label.replace("/", "_").replace(" ", "")
+                (out_dir / f"{safe}.png").write_bytes(s.png_bytes)
+        except OSError:
+            pass
+
+    return images
 
 
 __all__ = ["review_all", "enabled_critics"]

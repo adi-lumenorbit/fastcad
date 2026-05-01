@@ -15,6 +15,20 @@ fi
 HOST="${FASTCAD_HOST:-0.0.0.0}"
 PORT="${FASTCAD_PORT:-8765}"
 
+# Reload mode: pass --no-reload to disable. Default is to auto-reload
+# on source change (useful for interactive development). Disable when
+# running empirical tests so source edits don't reload the server
+# mid-test and conflate behaviour. Also set via FASTCAD_RELOAD=0.
+RELOAD=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-reload) RELOAD=0 ;;
+  esac
+done
+if [ "${FASTCAD_RELOAD:-}" = "0" ]; then
+  RELOAD=0
+fi
+
 if [ ! -x .venv/bin/python ]; then
   echo "no .venv found - create one: python3 -m venv .venv && .venv/bin/pip install -e .[dev]"
   exit 1
@@ -26,5 +40,12 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_FAKE:-}" != "1" ]; then
 fi
 
 echo "fastcad dev server starting on http://localhost:${PORT}/"
-echo "(if Windows can't reach it, allow inbound TCP ${PORT} in Windows Defender Firewall)"
-exec .venv/bin/python -m fastcad --host "${HOST}" --port "${PORT}" --reload
+if [ "$RELOAD" = "1" ]; then
+  echo "  (reload mode: source edits auto-reload — use --no-reload for stable test mode)"
+  echo "(if Windows can't reach it, allow inbound TCP ${PORT} in Windows Defender Firewall)"
+  exec .venv/bin/python -m fastcad --host "${HOST}" --port "${PORT}" --reload
+else
+  echo "  (no-reload mode: source edits NOT loaded; restart to pick up changes)"
+  echo "(if Windows can't reach it, allow inbound TCP ${PORT} in Windows Defender Firewall)"
+  exec .venv/bin/python -m fastcad --host "${HOST}" --port "${PORT}"
+fi

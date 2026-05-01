@@ -16,7 +16,7 @@ from typing import Any
 from ...model.render import Render
 from ...model.validate import Defect
 
-from ._common import CONCRETE_HINT_REQUIREMENT, safe_review
+from ._common import CONCRETE_HINT_REQUIREMENT, SectionImage, safe_review
 
 
 NAME = "general"
@@ -67,6 +67,7 @@ def review(
     renders: list[Render],
     client: Any,
     directive: str = DIRECTIVE,
+    sections: list[SectionImage] | None = None,
 ) -> list[Defect]:
     return safe_review(
         critic_name=NAME,
@@ -76,6 +77,7 @@ def review(
         spec_source=spec_source,
         renders=renders,
         client=client,
+        sections=sections,
     )
 
 

@@ -1,15 +1,40 @@
 """Shared critic plumbing — JSON parsing, multimodal call assembly,
 defect normalization. Each specific critic is a thin layer that
 provides a directive + name + maps the parsed response to Defect
-objects in its own way (or uses `parse_defects` directly)."""
+objects in its own way (or uses `parse_defects` directly).
+
+Section images. As of the section-critic addition, each `safe_review`
+call can be passed a list of `SectionImage`s alongside the iso renders.
+Sections are 2D cross-sections through the geometry (XY/XZ/YZ + any
+oblique planes the upstream chose). They give the vision model
+geometry it can interpret unambiguously — a thread tooth in XZ is a
+tooth, not a render artefact. Critics that don't use them just see
+extra labelled images; existing prompts work unchanged.
+"""
 from __future__ import annotations
 
+import base64
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...model.render import Render
 from ...model.validate import Defect
+
+
+@dataclass(frozen=True)
+class SectionImage:
+    """A rendered 2D cross-section the critic can consume. `label`
+    names the plane (e.g. 'XZ@y=0'); `metrics` is a small
+    JSON-friendly summary the directive can also reference textually."""
+
+    label: str
+    png_bytes: bytes
+    metrics: dict = field(default_factory=dict)
+
+    def b64(self) -> str:
+        return base64.b64encode(self.png_bytes).decode("ascii")
 
 
 CONCRETE_HINT_REQUIREMENT = """\
@@ -44,7 +69,21 @@ def build_user_message(
     cache_md: str,
     spec_source: str,
     n_renders: int,
+    n_sections: int = 0,
 ) -> str:
+    sections_blurb = ""
+    if n_sections > 0:
+        sections_blurb = (
+            f"\nThen you will see {n_sections} 2D cross-sections of the "
+            "geometry (axial XZ@y=0 and YZ@x=0, plus radial XY at "
+            "several z's). The cross-sections are the ground truth: a "
+            "thread tooth that is 'paper-thin' in the iso render will "
+            "appear as a paper-thin spike in the XZ section, and a "
+            "single-start helical thread should show ~length/pitch "
+            "peaks of consistent flank angle in the axial section. "
+            "Each section ships with computed metrics (peak count, "
+            "peak axial extent, radial range) that you can quote."
+        )
     return (
         "User's request:\n"
         f"{(user_prompt or '(no prompt)').strip()}\n"
@@ -59,8 +98,9 @@ def build_user_message(
         f"{spec_source.strip()}\n"
         "```\n"
         "\n"
-        f"You will now see {n_renders} renders of the resulting "
+        f"You will now see {n_renders} 3D renders of the resulting "
         "geometry. Apply the directive above; find specific defects."
+        f"{sections_blurb}"
     )
 
 
@@ -72,15 +112,24 @@ def call_vision(
     spec_source: str,
     renders: list[Render],
     *,
+    sections: list[SectionImage] | None = None,
     model: str = "claude-opus-4-7",
     max_tokens: int = 2048,
 ) -> str:
     """Single multimodal Anthropic call. Returns the text body of the
-    first text block in the response (caller parses)."""
+    first text block in the response (caller parses).
+
+    When `sections` is provided, the cross-section images are appended
+    after the iso renders with their labels and computed metrics so
+    the model can quote concrete numbers in its hints.
+    """
+    sections = sections or []
     content: list[dict] = [
         {
             "type": "text",
-            "text": build_user_message(user_prompt, cache_md, spec_source, len(renders)),
+            "text": build_user_message(
+                user_prompt, cache_md, spec_source, len(renders), len(sections)
+            ),
         }
     ]
     for r in renders:
@@ -95,6 +144,24 @@ def call_vision(
             }
         )
         content.append({"type": "text", "text": f"^ render angle: {r.angle}"})
+
+    for s in sections:
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": s.b64(),
+                },
+            }
+        )
+        metrics_blurb = (
+            f"  metrics: {json.dumps(s.metrics, separators=(',', ':'))}"
+            if s.metrics
+            else ""
+        )
+        content.append({"type": "text", "text": f"^ section: {s.label}{metrics_blurb}"})
 
     resp = client.messages.create(
         model=model,
@@ -168,6 +235,8 @@ def safe_review(
     spec_source: str,
     renders: list[Render],
     client: Any,
+    *,
+    sections: list[SectionImage] | None = None,
 ) -> list[Defect]:
     """Standard wrapper used by every critic: calls vision, parses
     JSON, returns Defect list. On API failure surfaces a warning
@@ -180,6 +249,7 @@ def safe_review(
             cache_md,
             spec_source,
             renders,
+            sections=sections,
         )
     except Exception as exc:  # noqa: BLE001
         return [
@@ -196,6 +266,7 @@ def safe_review(
 
 __all__ = [
     "CONCRETE_HINT_REQUIREMENT",
+    "SectionImage",
     "build_user_message",
     "call_vision",
     "parse_defects",

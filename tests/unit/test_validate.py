@@ -355,3 +355,52 @@ def test_cache_without_acceptance_returns_empty():
     ast, ec = _eval_cache(src)
     md = "# Old entry\n\n## Key dimensions\n\n- foo: 5\n"
     assert validate_against_cache(ast, md, ec) == []
+
+
+def test_axial_section_flags_paper_thin_thread():
+    """The deterministic killer of the paper-thin thread bug. A
+    `linear_extrude(twist=)` on a (minor circle + tiny triangle)
+    cross-section produces threads of ~0.03mm axial extent. The
+    schema's `peak_axial_extent_pct_of_pitch` lower bound must fire."""
+    src = """
+        $fn = 64;
+        module thread_xs() {
+          union() {
+            circle(r = 2.385);
+            translate([2.385, 0, 0])
+              polygon([[0, -0.25], [0.615, 0], [0, 0.25]]);
+          }
+        }
+        module shaft() {
+          linear_extrude(height = 6, twist = 2160, slices = 432)
+            thread_xs();
+        }
+        shaft();
+    """
+    ast, ec = _eval_cache(src)
+    md = _cache(
+        '{"axial_section": {'
+        '"plane": "XZ", "offset": 0,'
+        '"peak_axial_extent_pct_of_pitch": [0.30, 0.95],'
+        '"pitch": 1.0'
+        '}}'
+    )
+    defects = validate_against_cache(ast, md, ec)
+    extents = [d for d in defects if "axial_section" in d.where]
+    assert extents, f"expected axial_section defect, got {[d.where for d in defects]}"
+    # The dedicated thread_profile defect explains the paper-thin signature.
+    assert any(d.where == "axial_section.thread_profile" for d in extents)
+
+
+def test_axial_section_passes_smooth_geometry_when_no_thread_check():
+    """A smooth cylinder shouldn't trip axial_section unless the
+    schema explicitly asked for thread peaks. With only a flank-angle
+    range and no peak_axial_extent, no defect should fire."""
+    src = "$fn = 64; cylinder(h = 10, r = 3);"
+    ast, ec = _eval_cache(src)
+    # Empty peak constraints — schema entry exists but doesn't assert anything.
+    md = _cache('{"axial_section": {"plane": "XZ", "offset": 0}}')
+    defects = validate_against_cache(ast, md, ec)
+    assert not any("axial_section" in d.where for d in defects), (
+        f"expected no axial_section defects, got {[d.where for d in defects]}"
+    )

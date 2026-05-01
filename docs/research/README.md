@@ -106,9 +106,19 @@ becomes a tool error so the agent self-corrects in the same turn.
   "volume_range":  [<min>, <max>],
   "connected_components": <int>,
   "expected_modules": ["<regex-fragment>", "..."],
+  "axial_consistency": "helical",
+  "pitch": <mm>,
   "horizontal_slices_at_z": [
     {"z": <mm>, "outer_protrusions": <int>, "radius_range": [<min>, <max>]}
-  ]
+  ],
+  "axial_section": {
+    "plane": "XZ",
+    "offset": 0.0,
+    "peak_count": [<min>, <max>],
+    "pitch": <mm>,
+    "peak_axial_extent_pct_of_pitch": [<min>, <max>],
+    "flank_angle_deg": [<min>, <max>]
+  }
 }
 ```
 
@@ -132,6 +142,31 @@ Field meanings:
     thread bugs.
   - `radius_range` — optional `[min, max]` mm; the slice's radial
     extent must overlap.
+- **axial_consistency** — set to `"helical"` for threaded parts.
+  Triggers a peak-azimuth-rotation check across slices to detect
+  stacked-rings constructions. Pair with **pitch** so the validator
+  samples at non-integer-pitch z's (otherwise integer-pitch slices
+  always land at the same azimuth and false-positive).
+- **pitch** — thread pitch in mm. Read by `axial_consistency`,
+  `axial_section.peak_axial_extent_pct_of_pitch`.
+- **axial_section** — programmatic measurements on an XZ or YZ
+  cross-section through the geometry. **Catches paper-thin threads
+  deterministically** (the failure mode where
+  `linear_extrude(twist=)` with a too-narrow tooth cross-section
+  produces a helical band of ~zero axial thickness). Fields:
+  - `plane` — "XZ" (default) or "YZ".
+  - `offset` — axial-plane offset in mm. Default 0.
+  - `peak_count` — `[min, max]` thread peaks the section should
+    show. For a single-start thread of length L and pitch P,
+    expect ~L/P peaks (with slack: e.g. 18mm/1mm → 14–22).
+  - `peak_axial_extent` or `peak_axial_extent_pct_of_pitch` —
+    expected axial thickness of one tooth. The pct form is
+    multiplied by `pitch` (which must also be present). For a
+    proper ISO 60° thread, 0.30–0.95 × pitch is reasonable;
+    paper-thin threads come in at < 0.05 × pitch.
+  - `flank_angle_deg` — expected flank angle. ISO 60° threads
+    show 50°–70° at the rendered mesh resolution; pad to 40–80
+    to absorb tessellation noise.
 
 Use generous tolerances: ±5% on dimensions, ±15% on volume.
 Manifold tessellation introduces small numerical noise; tight

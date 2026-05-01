@@ -18,7 +18,7 @@ from typing import Any
 from ...model.render import Render
 from ...model.validate import Defect
 
-from ._common import CONCRETE_HINT_REQUIREMENT, safe_review
+from ._common import CONCRETE_HINT_REQUIREMENT, SectionImage, safe_review
 
 
 NAME = "threads"
@@ -77,8 +77,27 @@ Reference your hints to the agent's specific module names and
 parameter values. If the source has a `module thread_xs()` or
 similar, name it; if there's a `thread_pitch` parameter, name it.
 
-If the helical features in the renders match the spec, return an
-empty defects list.
+**Use the cross-section views as ground truth.** The XZ@y=0 and
+YZ@x=0 sections show the thread profile in axial cross-section: a
+correct ISO/UNF thread has clearly-visible triangular ridges of
+height ~0.5×pitch and axial extent ~0.4–0.85×pitch with consistent
+~60° flank angle. Each section ships with computed `axial_peaks`
+metrics — quote them in your hint.
+
+Specifically: if the section view shows the thread as **paper-thin
+horizontal whiskers** (mean_axial_extent ≪ pitch×0.4) when the spec
+calls for a real thread, the cross-section the agent fed to
+`linear_extrude(twist=)` has too-narrow azimuthal coverage. The
+canonical (minor circle + small triangle) construction CANNOT
+produce a real ISO thread no matter the slice count — the
+relationship `tooth_axial_extent ≈ tooth_azimuth_coverage / 360 ×
+pitch` makes a triangle of y-extent pitch/2 produce ~12° azimuthal
+coverage and ~0.03 mm of axial coverage. The fix is a polyhedron-
+based thread (helically-positioned vertices) or a much wider
+azimuthal tooth in the cross-section — not more slices.
+
+If the helical features in the renders + sections match the spec,
+return an empty defects list.
 """
     + "\n"
     + CONCRETE_HINT_REQUIREMENT
@@ -93,6 +112,7 @@ def review(
     renders: list[Render],
     client: Any,
     directive: str = DIRECTIVE,
+    sections: list[SectionImage] | None = None,
 ) -> list[Defect]:
     return safe_review(
         critic_name=NAME,
@@ -102,6 +122,7 @@ def review(
         spec_source=spec_source,
         renders=renders,
         client=client,
+        sections=sections,
     )
 
 

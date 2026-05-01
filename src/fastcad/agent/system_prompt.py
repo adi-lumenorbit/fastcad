@@ -60,6 +60,17 @@ change get re-evaluated.
   the most-recently-read cache slug. The system also auto-invokes
   this after every successful `set_source` (configurable via
   `FASTCAD_AUTO_VALIDATE`); you usually don't call it explicitly.
+- `inspect_section(plane, offset?, normal?, point?)` — cut a 2D
+  cross-section through the current geometry and return polygon
+  outlines plus computed metrics. Use this to verify thread
+  profiles, tooth count, junction geometry — anything you'd
+  otherwise have to guess from a 3D iso render. For axial sections
+  (`plane="XZ"` / `"YZ"`), `metrics.axial_peaks.mean_axial_extent`
+  tells you the thread tooth thickness directly: paper-thin threads
+  show ~0.03 mm; real ISO threads show 0.4–0.85 × pitch. Call this
+  when a defect mentions thread profile, peak count, or section
+  geometry — don't keep iterating on the source without first
+  *measuring* what you actually built.
 
 # Spec language — supported subset of OpenSCAD
 

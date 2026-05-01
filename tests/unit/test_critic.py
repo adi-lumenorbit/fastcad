@@ -334,7 +334,19 @@ def test_build_user_message_includes_source_and_cache():
     assert "make widget" in msg
     assert "cache content" in msg
     assert "cube([1,1,1])" in msg
-    assert "3 renders" in msg
+    assert "3 3D renders" in msg
+
+
+def test_build_user_message_with_sections():
+    msg = _common.build_user_message(
+        user_prompt="make widget",
+        cache_md="cache content",
+        spec_source="cube([1,1,1]);",
+        n_renders=3,
+        n_sections=5,
+    )
+    assert "5 2D cross-sections" in msg
+    assert "axial_peaks" in msg or "cross-section" in msg.lower()
 
 
 def test_persistence_detection_finds_repeated_keys():

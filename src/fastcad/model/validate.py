@@ -126,6 +126,7 @@ def validate_against_cache(
         defects.extend(_check_connected_components(primary, schema))
         defects.extend(_check_horizontal_slices(primary, schema))
         defects.extend(_check_axial_consistency(primary, schema))
+        defects.extend(_check_axial_section(primary, schema))
     elif eval_cache:
         # cache had nodes but none were 3D — treat as "primary missing"
         defects.append(
@@ -511,6 +512,14 @@ def _check_axial_consistency(primary: ModuleEval, schema: dict) -> list[Defect]:
     Take the peak azimuth at each `horizontal_slices_at_z` slice;
     if a strong majority of pairs are within ±10° of each other,
     flag stacked-rings.
+
+    **Slice-z trap fix**: when `pitch` is provided in the schema, this
+    function adds an offset to each slice z so they land on
+    non-integer-pitch fractions (e.g. {0.27, 0.61, 0.83} of pitch).
+    Without that offset, slice z's at integer multiples of pitch
+    always give the same peak azimuth (every full turn lands the
+    cross-section back at its starting orientation) — false-positive
+    flagging valid threads.
     """
     mode = schema.get("axial_consistency")
     if mode != "helical":
@@ -518,11 +527,16 @@ def _check_axial_consistency(primary: ModuleEval, schema: dict) -> list[Defect]:
     slices = schema.get("horizontal_slices_at_z") or []
     if len(slices) < 2:
         return []
+    pitch = schema.get("pitch")
+    # Use a fixed irrational-ish offset that's guaranteed not to be a
+    # rational fraction of pitch with small denominator. 0.27·pitch
+    # works for any pitch value.
+    z_offset = 0.27 * float(pitch) if pitch is not None else 0.0
     azimuths: list[float] = []
     for spec in slices:
         if not isinstance(spec, dict) or "z" not in spec:
             continue
-        z = float(spec["z"])
+        z = float(spec["z"]) + z_offset
         cs = _slice_at_z(primary.manifold, z)
         if cs is None or cs.is_empty():
             continue
@@ -564,6 +578,150 @@ def _check_axial_consistency(primary: ModuleEval, schema: dict) -> list[Defect]:
             )
         ]
     return []
+
+
+def _check_axial_section(primary: ModuleEval, schema: dict) -> list[Defect]:
+    """Programmatic checks on an axial cross-section (XZ or YZ).
+
+    Schema fragment:
+
+        "axial_section": {
+          "plane": "XZ"|"YZ",            # default "XZ"
+          "offset": 0.0,                  # default 0.0
+          "peak_count": [min, max],
+          "peak_axial_extent": [min, max],         # absolute mm range
+          "peak_axial_extent_pct_of_pitch": [...], # alt — multiplied by `pitch`
+          "pitch": 1.0,                   # required if using *_pct_of_pitch
+          "flank_angle_deg": [min, max]
+        }
+
+    This is the *deterministic killer of paper-thin thread bugs*:
+    `peak_axial_extent` ≪ `pitch×0.4` triggers regardless of how the
+    thread was constructed. Replaces `axial_consistency`'s brittle
+    peak-azimuth-rotation check (which fails for valid threads
+    sampled at integer-pitch z values) with a measurement that
+    actually quantifies the thread profile.
+    """
+    spec = schema.get("axial_section")
+    if not isinstance(spec, dict):
+        return []
+    # Lazy import to avoid a circular dep — sections.py imports manifold3d
+    # but not validate.py.
+    from . import sections as _sections
+
+    plane = str(spec.get("plane", "XZ")).upper()
+    if plane not in ("XZ", "YZ"):
+        return [
+            Defect(
+                severity="warning",
+                where="axial_section.plane",
+                expected="XZ or YZ",
+                actual=str(plane),
+                hint="Schema's axial_section.plane must be XZ or YZ.",
+            )
+        ]
+    offset = float(spec.get("offset", 0.0))
+
+    try:
+        section = _sections.extract_axis_section(primary.manifold, plane, offset)
+    except Exception as exc:  # noqa: BLE001
+        return [
+            Defect(
+                severity="error",
+                where="axial_section",
+                expected="non-empty section",
+                actual=f"extraction failed: {type(exc).__name__}: {exc}",
+                hint="Internal: section extraction crashed. Check the manifold is valid.",
+            )
+        ]
+    if section.is_empty:
+        return [
+            Defect(
+                severity="error",
+                where="axial_section",
+                expected=f"non-empty section through {plane}@offset={offset}",
+                actual="empty",
+                hint="The section plane misses the geometry — check that the offset is inside the bbox.",
+            )
+        ]
+
+    metrics = _sections.axial_peak_metrics(section)
+    out: list[Defect] = []
+
+    if "peak_count" in spec:
+        out.extend(_check_range(
+            "axial_section.peak_count",
+            float(metrics.peak_count),
+            spec["peak_count"],
+            "peaks",
+        ))
+
+    extent_spec = None
+    if "peak_axial_extent" in spec:
+        extent_spec = spec["peak_axial_extent"]
+        unit = "mm"
+    elif "peak_axial_extent_pct_of_pitch" in spec:
+        if "pitch" not in spec:
+            out.append(
+                Defect(
+                    severity="warning",
+                    where="axial_section.peak_axial_extent_pct_of_pitch",
+                    expected="`pitch` field present alongside",
+                    actual="missing `pitch`",
+                    hint="Schema must include `pitch` when using peak_axial_extent_pct_of_pitch.",
+                )
+            )
+        else:
+            pitch = float(spec["pitch"])
+            raw = spec["peak_axial_extent_pct_of_pitch"]
+            if isinstance(raw, (list, tuple)) and len(raw) == 2:
+                extent_spec = [float(raw[0]) * pitch, float(raw[1]) * pitch]
+                unit = "mm"
+    if extent_spec is not None:
+        out.extend(_check_range(
+            "axial_section.peak_axial_extent",
+            metrics.mean_axial_extent,
+            extent_spec,
+            unit,
+        ))
+        # Add a tailored hint when the failure is the paper-thin signature.
+        if (
+            isinstance(extent_spec, (list, tuple))
+            and len(extent_spec) == 2
+            and metrics.mean_axial_extent < float(extent_spec[0])
+        ):
+            out.append(
+                Defect(
+                    severity="error",
+                    where="axial_section.thread_profile",
+                    expected="thread teeth with non-trivial axial extent",
+                    actual=(
+                        f"mean_axial_extent={metrics.mean_axial_extent:.3f} mm "
+                        f"(peak_count={metrics.peak_count}, max_extent={metrics.max_axial_extent:.3f} mm)"
+                    ),
+                    hint=(
+                        "The thread teeth are paper-thin in axial section. "
+                        "linear_extrude(twist=) maps the cross-section's "
+                        "azimuthal coverage to axial tooth thickness — a "
+                        "narrow triangle (y-extent ≈ pitch/2) gives ~12° "
+                        "azimuthal coverage and ~0.03 mm axial extent. Use a "
+                        "polyhedron-based thread (helically-positioned "
+                        "vertices) or a sector cross-section spanning enough "
+                        "azimuth to give the desired axial tooth height. "
+                        "Adding more `slices` will NOT fix this."
+                    ),
+                )
+            )
+
+    if "flank_angle_deg" in spec:
+        out.extend(_check_range(
+            "axial_section.flank_angle_deg",
+            metrics.mean_flank_angle_deg,
+            spec["flank_angle_deg"],
+            "°",
+        ))
+
+    return out
 
 
 def _cross_section_radius_range(cs: Any) -> tuple[float, float]:

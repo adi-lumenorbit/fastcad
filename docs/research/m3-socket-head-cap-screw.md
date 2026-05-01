@@ -90,6 +90,7 @@ the numbers a few percent. Sized for an M3 × 20 cap screw.
   "volume_range": [120, 230],
   "connected_components": 1,
   "axial_consistency": "helical",
+  "pitch": 0.5,
   "expected_modules": [
     "shaft|thread",
     "head|cap"
@@ -100,7 +101,15 @@ the numbers a few percent. Sized for an M3 × 20 cap screw.
     {"z": 11.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]},
     {"z": 14.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]},
     {"z": 17.0, "outer_protrusions": 1, "radius_range": [1.10, 1.55]}
-  ]
+  ],
+  "axial_section": {
+    "plane": "XZ",
+    "offset": 0.0,
+    "peak_count": [30, 45],
+    "pitch": 0.5,
+    "peak_axial_extent_pct_of_pitch": [0.30, 0.95],
+    "flank_angle_deg": [40, 80]
+  }
 }
 ```
 
@@ -119,22 +128,43 @@ plus an assembling top-level module:
   `head()`. This is the only top-level call.
 
 **Helical thread construction (the part agents most often get
-wrong).** A correct ISO single-start thread is built by extruding a
-2D cross-section that is **the minor-diameter circle PLUS one
-triangular tooth on the +X side**, then twisting that profile around
-Z as Z rises. Concretely:
+wrong).**
+
+The trap most agents fall into: cross-section = (minor circle + tiny
+triangle bump). This LOOKS correct in 2D — one bump, single-start —
+but `linear_extrude(twist=)` maps the cross-section's **azimuthal
+coverage** to the **axial extent** of each thread tooth in the final
+3D shape. A small triangle of y-extent `pitch/2` covers only ~12° of
+azimuth at minor radius, which produces a thread whose teeth are
+~0.03 mm tall axially — a "helical band of zero thickness" that fails
+any axial-section inspection. **No `slices` count fixes this.**
+
+**The correct approach:** the cross-section's outer envelope must
+sweep through `r_minor → r_major → r_minor` over a full 360° of
+azimuth. When extruded with `twist = 360°·length/pitch` (one full
+rotation per pitch), this generates a real sawtooth thread profile
+in any axial section. Build with `union()` of triangular wedges
+since the parser doesn't support list comprehensions:
 
 ```
+N = 96;
 module thread_xs() {
-  // Minor-diameter core PLUS a single radial tooth at azimuth 0.
   union() {
-    circle(d = minor);
-    translate([minor / 2, 0])
-      polygon([
-        [0,                 -pitch / 4],
-        [(major - minor)/2,  0       ],
-        [0,                  pitch / 4]
-      ]);
+    for (i = [0 : N - 1]) {
+      let (
+        a0 = 360 * i / N,
+        a1 = 360 * (i + 1) / N,
+        t0 = 1 - abs(1 - a0 / 180),    // 0 → 1 → 0 across [0, 360]
+        t1 = 1 - abs(1 - a1 / 180),
+        r0 = minor / 2 + (major - minor) / 2 * t0,
+        r1 = minor / 2 + (major - minor) / 2 * t1
+      )
+        polygon([
+          [0,            0],
+          [r0 * cos(a0), r0 * sin(a0)],
+          [r1 * cos(a1), r1 * sin(a1)],
+        ]);
+    }
   }
 }
 
@@ -142,20 +172,21 @@ module shaft() {
   linear_extrude(
     height = length,
     twist  = 360 * length / pitch,   // RH thread; negate for LH
-    slices = max(64, abs(360 * length / pitch) / 5)
+    slices = max(64, floor(abs(360 * length / pitch) / 5))
   )
     thread_xs();
 }
 ```
 
-The cross-section is `union()` of (small circle + one triangle), NOT
-`difference()` of (big circle − one triangle). The latter produces
-inverted geometry — a smooth shaft with a thin spiral *groove* — and
-is wrong.
-
 `slices = |twist| / 5` (≥ 64) gives ~5° of rotation per slice, which
-keeps the helix smooth. With pitch = 0.5 and length = 20 that's
-14400°/5 ≈ 2880 slices.
+keeps the helix smooth.
+
+**Verifying the construction.** After committing the source, call
+`inspect_section(plane="XZ", offset=0)` and read
+`metrics.axial_peaks.mean_axial_extent`. A correct thread shows
+0.30–0.95 × pitch. If you see < 0.05 mm, the cross-section's
+azimuthal coverage is too narrow — go back and use the lobed
+approach above, not a "minor circle + tiny triangle."
 
 **Hex socket.** OpenSCAD's `cylinder(d=…, $fn=6)` produces a hex
 prism whose `d` is the **across-corners** diameter, not the
@@ -175,10 +206,12 @@ cylinder(d = across_corners, h = socket_depth + 0.01, $fn = 6)`. The
   circle gives an N-start thread. Standard ISO threads are single-
   start. Use exactly ONE tooth (one `translate([minor/2, 0])
   polygon(...)`) in `thread_xs()`.
-- **Hairline thread.** If the polygon points are colinear (e.g.
-  `[[0,0],[major-minor,0],[0,0]]`) the tooth has zero area and the
-  thread renders as a paper-thin fin. The polygon must form a real
-  triangle: three non-colinear points.
+- **Paper-thin / zero-axial-extent thread.** A "minor circle + small
+  triangle" cross-section produces threads whose visible teeth have
+  ~0.03 mm of axial extent, no matter how many slices you use. The
+  fix is the lobed cross-section in **Helical thread construction**
+  above — the tooth must sweep azimuthally enough to give the
+  desired axial tooth height.
 - **Inverted thread (cylinder − groove).** As above, `union()` of
   a minor-diameter core + ridge, NOT `difference()` from a major
   cylinder.

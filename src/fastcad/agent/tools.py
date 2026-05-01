@@ -185,6 +185,62 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "inspect_section",
+        "description": (
+            "Cut a 2D cross-section through the current geometry and "
+            "return its polygon outlines + computed metrics. The 2D "
+            "section is the ground truth your eyes can't extract from "
+            "a 3D iso render — use this to verify thread profiles, "
+            "tooth count, head/shank junction geometry, etc. before "
+            "concluding a fix is correct.\n\n"
+            "`plane` is one of \"XY\" / \"XZ\" / \"YZ\" for axis-aligned "
+            "sections, or \"oblique\" together with a `normal` and "
+            "`point` for arbitrary planes. `offset` is meaningful only "
+            "for axis-aligned planes (XY: z=offset; XZ: y=offset; YZ: "
+            "x=offset).\n\n"
+            "Returns {polygons: [[[u,v],...],...], metrics: {...}}. "
+            "Polygons are 2D contour outlines; for axial sections "
+            "`metrics.axial_peaks.{count,mean_axial_extent,"
+            "mean_flank_angle_deg}` lets you check thread profile "
+            "without guessing — paper-thin threads have "
+            "mean_axial_extent < 0.05 mm; real ISO threads have "
+            "0.4–0.85 × pitch."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plane": {
+                    "type": "string",
+                    "enum": ["XY", "XZ", "YZ", "oblique"],
+                    "description": "Section plane.",
+                },
+                "offset": {
+                    "type": "number",
+                    "description": "Plane offset in mm (axis-aligned only). XY: z; XZ: y; YZ: x.",
+                },
+                "normal": {
+                    "type": "array",
+                    "description": "Required when plane=oblique. 3-vector plane normal.",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                },
+                "point": {
+                    "type": "array",
+                    "description": "Required when plane=oblique. Point on the plane.",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                },
+                "include_polygons": {
+                    "type": "boolean",
+                    "description": "Whether to include raw polygon vertices in the response. Default true.",
+                },
+            },
+            "required": ["plane"],
+        },
+    },
+    {
         "name": "research",
         "description": (
             "Spawn a Claude Code subagent to research a standardized "
@@ -400,7 +456,71 @@ def _dispatch_inner(
         )
         return ToolResult(content=json.dumps(result.to_dict()))
 
+    if name == "inspect_section":
+        return _dispatch_inspect_section(args, session)
+
     return ToolResult(content=json.dumps({"error": f"unknown tool: {name}"}))
+
+
+def _dispatch_inspect_section(args: dict, session: SessionState) -> ToolResult:
+    """Cut a 2D cross-section through the session's primary manifold.
+
+    Picks the largest 3D node by volume as 'primary' (same heuristic
+    the validator uses). Returns polygons + per-section metrics. The
+    raw polygons let the agent program directly against the geometry
+    ('do I see N peaks?'); the metrics give pre-computed answers
+    ('peak_count': N) for the common questions.
+    """
+    from ..model import sections as _sections
+
+    primary = max(
+        (me for me in session.cache.values() if me.manifold is not None),
+        key=lambda me: float(me.manifold.volume()),
+        default=None,
+    )
+    if primary is None:
+        return ToolResult(content=json.dumps({
+            "ok": False,
+            "error": "no 3D geometry yet — call set_source first.",
+        }))
+
+    plane = str(args.get("plane", "")).upper()
+    offset = float(args.get("offset", 0.0) or 0.0)
+    include_polygons = bool(args.get("include_polygons", True))
+
+    try:
+        if plane in ("XY", "XZ", "YZ"):
+            section = _sections.extract_axis_section(primary.manifold, plane, offset)
+        elif plane == "OBLIQUE":
+            normal = args.get("normal")
+            point = args.get("point", [0.0, 0.0, 0.0])
+            if not (isinstance(normal, (list, tuple)) and len(normal) == 3):
+                return ToolResult(content=json.dumps({
+                    "ok": False,
+                    "error": "plane=oblique requires `normal` as a 3-element array.",
+                }))
+            section = _sections.extract_oblique_section(
+                primary.manifold, normal=tuple(normal), point=tuple(point)
+            )
+        else:
+            return ToolResult(content=json.dumps({
+                "ok": False,
+                "error": f"unknown plane {plane!r}. Use XY, XZ, YZ, or oblique.",
+            }))
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(content=json.dumps({
+            "ok": False,
+            "error": f"section extraction failed: {type(exc).__name__}: {exc}",
+        }))
+
+    metrics = _sections.section_metrics_dict(section)
+    payload: dict = {
+        "ok": True,
+        "metrics": metrics,
+    }
+    if include_polygons:
+        payload["polygons"] = [list(map(list, poly)) for poly in section.polygons]
+    return ToolResult(content=json.dumps(payload))
 
 
 def _run_structural_validation(
@@ -500,6 +620,10 @@ def _run_structural_validation(
                 # Pass the recent history so the orchestrator can
                 # decide whether to escalate (P7/P8 fix-it critic).
                 prior_defects=list(session.defect_history),
+                # Pass the primary manifold so the orchestrator can
+                # extract canonical 2D cross-sections to feed the
+                # critics alongside the iso renders.
+                primary_manifold=primary.manifold,
             )
             defects.extend(vision_defects)
 
@@ -562,6 +686,16 @@ def _summarize_result(name: str, result: ToolResult) -> dict:
         return {"ok": payload.get("ok")}
     if name == "select_face":
         return {"ok": payload.get("ok")}
+    if name == "inspect_section":
+        m = payload.get("metrics") or {}
+        out = {"ok": payload.get("ok"), "plane": m.get("plane_label")}
+        if "axial_peaks" in m:
+            ap = m["axial_peaks"]
+            out["peak_count"] = ap.get("count")
+            out["mean_axial_extent"] = ap.get("mean_axial_extent")
+        if "radial" in m:
+            out["outer_protrusions"] = m["radial"].get("outer_protrusions")
+        return out
     return {}
 
 

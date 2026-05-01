@@ -109,6 +109,7 @@ fully threaded screw of the same overall length.
   "volume_range": [800, 1600],
   "connected_components": 1,
   "axial_consistency": "helical",
+  "pitch": 1.0,
   "expected_modules": [
     "shaft|thread|shank",
     "head|hex"
@@ -118,7 +119,15 @@ fully threaded screw of the same overall length.
     {"z": 8.0,  "outer_protrusions": 1, "radius_range": [2.20, 3.15]},
     {"z": 12.0, "outer_protrusions": 1, "radius_range": [2.20, 3.15]},
     {"z": 16.0, "outer_protrusions": 1, "radius_range": [2.20, 3.15]}
-  ]
+  ],
+  "axial_section": {
+    "plane": "XZ",
+    "offset": 0.0,
+    "peak_count": [14, 22],
+    "pitch": 1.0,
+    "peak_axial_extent_pct_of_pitch": [0.30, 0.95],
+    "flank_angle_deg": [40, 80]
+  }
 }
 ```
 
@@ -184,43 +193,101 @@ conical relief on the underside that defines `dw`), apply a
 `dw_min` and bottom diameter is `across_corners`.
 
 **Helical thread construction (the part agents most often get
-wrong).** A correct ISO single-start thread is built by extruding a
-2D cross-section that is **the minor-diameter circle PLUS one
-triangular tooth on the +X side**, then twisting that profile around
-Z as Z rises. Concretely:
+wrong).**
+
+The trap most agents fall into: cross-section = (minor circle + tiny
+triangle bump). This LOOKS correct in 2D — one bump, single-start —
+but `linear_extrude(twist=)` maps the cross-section's **azimuthal
+coverage** to the **axial extent** of each thread tooth in the final
+3D shape. A small triangle of y-extent `pitch/2` covers only ~12° of
+azimuth at minor radius (~`arctan(0.25 / 2.4) × 2`), which produces
+a thread whose teeth are ~0.03 mm tall axially — a "helical band of
+zero thickness" that fails any axial-section inspection. **No `slices`
+count fixes this.**
+
+**The correct approach:** the cross-section's outer envelope must
+sweep through `r_minor → r_major → r_minor` over a full 360° of
+azimuth. When extruded with `twist = 360°·length/pitch` (one full
+rotation per pitch), this generates a real sawtooth thread profile
+in any axial section. Use a polygon with N points around the full
+circle, where r varies as a triangle wave:
 
 ```
 module thread_xs() {
-  // Minor-diameter core PLUS a single radial tooth at azimuth 0.
+  // r(θ) varies between r_minor (at θ=0, 360°) and r_major (at θ=180°).
+  // Linear extrude with twist = 360°·length/pitch sweeps this profile
+  // along z, producing single-start sawtooth threads with proper
+  // axial extent.
+  $fn = 96;   // local-only; N points around the lobed cross-section
+  N = 96;
+  polygon([
+    // Vertex i at angle 360°·i/N, radius r_min + (r_max-r_min)·t,
+    // where t = triangle wave: 0 at i=0, 1 at i=N/2, 0 at i=N.
+    // Emit each vertex with a constant expression — no list compr.
+    // (See Implementation note: parser doesn't support [for(...)..].)
+  ]);
+}
+```
+
+> **Parser note.** This subset of OpenSCAD does NOT support list
+> comprehensions inside expressions. You cannot write
+> `polygon([for (i = [0:N]) [r·cos(θ), r·sin(θ)]])`. Two workarounds:
+>
+> 1. **`union()` of `for` over many `polygon()` triangles** — build
+>    the lobed cross-section as a fan of triangles from the origin,
+>    iterating with `for (i = [0:N-1]) polygon([...])` inside a
+>    `union()` block.
+> 2. **`polyhedron(points=[...], faces=[...])`** with vertex/face
+>    lists computed externally and pasted in. Reliable but verbose;
+>    only viable for small N. For threads, prefer (1).
+
+A worked construction using approach (1):
+
+```
+N = 96;
+module thread_xs() {
+  // Lobed cross-section: N triangular wedges from origin to r(θ).
+  // r(θ) is a triangle wave between r_minor and r_major.
   union() {
-    circle(d = minor);
-    translate([minor / 2, 0])
-      polygon([
-        [0,                 -pitch / 4],
-        [(major - minor)/2,  0       ],
-        [0,                  pitch / 4]
-      ]);
+    for (i = [0 : N - 1]) {
+      // Compute angles + radii at i and i+1.
+      let (
+        a0 = 360 * i / N,
+        a1 = 360 * (i + 1) / N,
+        t0 = 1 - abs(1 - a0 / 180),     // 0 → 1 → 0 across [0, 360]
+        t1 = 1 - abs(1 - a1 / 180),
+        r0 = minor / 2 + (major - minor) / 2 * t0,
+        r1 = minor / 2 + (major - minor) / 2 * t1
+      )
+        polygon([
+          [0,            0],
+          [r0 * cos(a0), r0 * sin(a0)],
+          [r1 * cos(a1), r1 * sin(a1)],
+        ]);
+    }
   }
 }
 
 module shaft() {
   linear_extrude(
-    height = length,
-    twist  = 360 * length / pitch,   // RH thread; negate for LH
-    slices = max(64, abs(360 * length / pitch) / 5)
+    height = b,
+    twist  = 360 * b / pitch,        // RH single-start
+    slices = max(64, floor((360 * b / pitch) / 5))
   )
     thread_xs();
 }
 ```
 
-The cross-section is `union()` of (small circle + one triangle), NOT
-`difference()` of (big circle − one triangle). The latter produces
-inverted geometry — a smooth shaft with a thin spiral *groove* — and
-is wrong.
-
 `slices = |twist| / 5` (≥ 64) gives ~5° of rotation per slice, which
-keeps the helix smooth. With pitch = 1.0 and length = 30 that's
-10800°/5 = 2160 slices.
+keeps the helix smooth. For M6×30 with b=18, pitch=1, that's 1296
+slices — enough to render clean teeth.
+
+**Verifying the construction.** After committing the source, call
+`inspect_section(plane="XZ", offset=0)` and read
+`metrics.axial_peaks.mean_axial_extent`. A correct thread shows
+0.30–0.95 × pitch (e.g. ~0.36 mm for pitch=1). If you see < 0.05 mm,
+the cross-section's azimuthal coverage is too narrow — go back and
+use the lobed approach above, not a "minor circle + tiny triangle."
 
 **ISO 4014 (partially threaded) variant.** When the requested length
 exceeds b (18 mm for M6 with l ≤ 125), the upper portion of the
@@ -256,17 +323,19 @@ For ISO 4017 (fully threaded) just call `shaft()` with `length = l`.
   translate([0, 0, i*pitch]) rotate([0, 0, i*step]) ...` produces
   visible discrete rings, not a continuous helix. Always use a
   single `linear_extrude(twist=...)` over the full length.
-- **Multi-start thread.** A cross-section with N teeth around the
-  circle gives an N-start thread. Standard ISO threads are single-
-  start. Use exactly ONE tooth (one `translate([minor/2, 0])
-  polygon(...)`) in `thread_xs()`.
-- **Hairline thread.** If the polygon points are colinear (e.g.
-  `[[0,0],[major-minor,0],[0,0]]`) the tooth has zero area and the
-  thread renders as a paper-thin fin. The polygon must form a real
-  triangle: three non-colinear points.
-- **Inverted thread (cylinder − groove).** As above, `union()` of
-  a minor-diameter core + ridge, NOT `difference()` from a major
-  cylinder.
+- **Multi-start thread.** A lobed cross-section with N peaks gives
+  an N-start thread when twisted. Standard ISO threads are single-
+  start: the cross-section's r(θ) profile must have exactly ONE
+  maximum (at θ=180°) and ONE minimum (at θ=0°/360°) per full turn.
+- **Paper-thin / zero-axial-extent thread.** A "minor circle + small
+  triangle" cross-section produces threads whose visible teeth have
+  ~0.03 mm of axial extent, no matter how many slices you use. The
+  fix is the lobed cross-section in **Helical thread construction**
+  above — the tooth must sweep azimuthally enough to give the
+  desired axial tooth height.
+- **Inverted thread (cylinder − groove).** Use `union()` of a
+  lobed cross-section that sweeps `r_min → r_max → r_min`, NOT
+  `difference()` from a major cylinder.
 - **Forgetting the unthreaded shank on ISO 4014.** A long ISO 4014
   bolt (l > b) has a smooth cylindrical section between the head
   fillet and the thread runout. If the entire shank is threaded

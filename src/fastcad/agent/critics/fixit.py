@@ -25,7 +25,7 @@ from typing import Any
 from ...model.render import Render
 from ...model.validate import Defect
 
-from ._common import safe_review
+from ._common import SectionImage, safe_review
 
 
 NAME = "fixit"
@@ -106,6 +106,7 @@ def review(
     client: Any,
     directive: str | None = None,
     prior_defects: list[list[dict]] | None = None,
+    sections: list[SectionImage] | None = None,
 ) -> list[Defect]:
     """Run the fix-it critic. `prior_defects` is a list-of-lists
     where each inner list is the defects produced by one prior
@@ -125,6 +126,7 @@ def review(
         spec_source=spec_source,
         renders=renders,
         client=client,
+        sections=sections,
     )
 
 
