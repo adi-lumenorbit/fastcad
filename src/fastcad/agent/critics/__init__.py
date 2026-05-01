@@ -297,7 +297,10 @@ def _build_section_images(
         or persist_slug is not None
     )
     if debug_dump and images:
-        repo_root = Path(__file__).resolve().parents[3]
+        # __file__ is src/fastcad/agent/critics/__init__.py — five
+        # parents up reaches the repo root (matches `tmp/research/`
+        # rooting in `model/render.py:persist_renders`).
+        repo_root = Path(__file__).resolve().parents[4]
         slug = persist_slug or "session"
         out_dir = repo_root / "tmp" / "sections" / f"{slug}-{time.strftime('%Y%m%dT%H%M%S')}"
         try:
