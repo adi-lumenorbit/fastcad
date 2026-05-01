@@ -29,6 +29,7 @@ from typing import Any, Callable
 from ...model.render import Render, persist_renders, render_scad_source
 from ...model.validate import Defect
 
+from . import fixit as _fixit
 from . import general as _general
 from . import threads as _threads
 
@@ -62,6 +63,47 @@ def _register(module) -> None:
 
 _register(_general)
 _register(_threads)
+_register(_fixit)
+
+
+# Persistence threshold for P7/P8: how many consecutive iterations
+# must show overlapping defect `where` fields before we escalate.
+PERSISTENCE_THRESHOLD = 3
+
+
+def detect_persistent_defects(
+    history: list[list[dict]],
+    threshold: int = PERSISTENCE_THRESHOLD,
+) -> list[str]:
+    """Return the set of defect `where` keys that have appeared in
+    each of the last `threshold` iterations. Empty list = no
+    persistence detected; agent is making progress.
+
+    Compares by `where` prefix so e.g.
+    `horizontal_slices_at_z[0].outer_protrusions` and
+    `horizontal_slices_at_z[2].outer_protrusions` collapse to the
+    same persistence key. The defects don't need to be identical
+    across iterations — what matters is the same defect CLASS.
+    """
+    if len(history) < threshold:
+        return []
+    recent = history[-threshold:]
+    if any(not it for it in recent):
+        return []   # an empty iteration breaks the streak
+    keys_per_iter: list[set[str]] = []
+    for defects in recent:
+        keys = set()
+        for d in defects:
+            where = str(d.get("where", ""))
+            # Collapse [N] indexed wheres to the bare path so
+            # axial_consistency at slice 0 and slice 2 are "same".
+            key = where.split("[")[0] if "[" in where else where
+            keys.add(key)
+        keys_per_iter.append(keys)
+    intersection = keys_per_iter[0]
+    for k in keys_per_iter[1:]:
+        intersection &= k
+    return sorted(intersection)
 
 
 def enabled_critics() -> list[str]:
@@ -84,6 +126,7 @@ def review_all(
     render_fn: Callable | None = None,
     persist_slug: str | None = None,
     only: list[str] | None = None,
+    prior_defects: list[list[dict]] | None = None,
 ) -> list[Defect]:
     """Render once, dispatch all enabled critics in parallel, merge
     defects.
@@ -115,13 +158,27 @@ def review_all(
     if persist_slug:
         persist_renders(renders, persist_slug)
 
+    # Decide which critics fire this iteration.
+    #  - The fix-it critic ONLY runs when persistence is detected
+    #    (P7/P8 escalation). Otherwise it's noisy + costly.
+    #  - All other critics run every iteration.
     names = only if only is not None else enabled_critics()
+    persistent = detect_persistent_defects(prior_defects or [])
+    if "fixit" in names and not persistent:
+        names = [n for n in names if n != "fixit"]
     critics = [_REGISTRY[n] for n in names if n in _REGISTRY]
+
+    if persistent and on_progress is not None:
+        on_progress({
+            "type": "critics_escalation",
+            "persistent_keys": persistent,
+            "fixit_will_fire": "fixit" in names,
+        })
 
     def _run_one(critic: _Critic) -> tuple[str, list[Defect]]:
         client = (client_factory or _default_client)()
         try:
-            return critic.name, critic.review(
+            kwargs = dict(
                 spec_source=spec_source,
                 cache_md=cache_md,
                 user_prompt=user_prompt,
@@ -129,6 +186,12 @@ def review_all(
                 client=client,
                 directive=critic.directive,
             )
+            # The fix-it critic needs prior_defects in escalation
+            # mode to compose its directive. Other critics ignore
+            # this kwarg (their `review` doesn't accept it).
+            if critic.name == "fixit":
+                kwargs["prior_defects"] = prior_defects or []
+            return critic.name, critic.review(**kwargs)
         except Exception as exc:  # noqa: BLE001
             return critic.name, [
                 Defect(

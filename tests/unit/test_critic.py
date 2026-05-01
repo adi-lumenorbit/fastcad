@@ -337,6 +337,110 @@ def test_build_user_message_includes_source_and_cache():
     assert "3 renders" in msg
 
 
+def test_persistence_detection_finds_repeated_keys():
+    """detect_persistent_defects spots a defect class that repeats
+    across the last N iterations."""
+    history = [
+        [{"where": "axial_consistency"}, {"where": "horizontal_slices_at_z[0].outer_protrusions"}],
+        [{"where": "axial_consistency"}, {"where": "horizontal_slices_at_z[2].outer_protrusions"}],
+        [{"where": "axial_consistency"}, {"where": "horizontal_slices_at_z[4].outer_protrusions"}],
+    ]
+    keys = critics.detect_persistent_defects(history, threshold=3)
+    # axial_consistency appears in all three; the indexed
+    # outer_protrusions collapse to the same prefix and also persist.
+    assert "axial_consistency" in keys
+    assert "horizontal_slices_at_z" in keys
+
+
+def test_persistence_detection_below_threshold_returns_empty():
+    history = [[{"where": "x"}], [{"where": "x"}]]
+    assert critics.detect_persistent_defects(history, threshold=3) == []
+
+
+def test_persistence_detection_streak_broken_returns_empty():
+    """An empty defect list mid-streak breaks persistence — the
+    agent fixed something."""
+    history = [
+        [{"where": "x"}],
+        [],   # agent passed an iteration
+        [{"where": "x"}],
+    ]
+    assert critics.detect_persistent_defects(history, threshold=3) == []
+
+
+def test_fixit_critic_skips_when_no_prior_defects():
+    """Without prior defects, the fix-it critic returns nothing —
+    it's escalation-only."""
+    from fastcad.agent.critics import fixit
+    out = fixit.review(
+        spec_source="x", cache_md="x", user_prompt="x",
+        renders=_renders(),
+        client=_FakeClient("ignored"),
+        prior_defects=None,
+    )
+    assert out == []
+
+
+def test_fixit_critic_includes_prior_defects_in_directive():
+    """The fix-it critic embeds a summary of prior defects in the
+    directive so the model knows what's been tried and failed."""
+    from fastcad.agent.critics import fixit
+    captured: dict = {}
+
+    class CapturingClient:
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                captured["system"] = kwargs.get("system")
+                return _FakeResponse(json.dumps({"defects": []}))
+    fixit.review(
+        spec_source="module shaft() { }",
+        cache_md="# cache",
+        user_prompt="screw",
+        renders=_renders(),
+        client=CapturingClient(),
+        prior_defects=[
+            [{"where": "axial_consistency", "actual": "stacked rings"}],
+            [{"where": "axial_consistency", "actual": "stacked rings"}],
+            [{"where": "axial_consistency", "actual": "stacked rings"}],
+        ],
+    )
+    sys_text = captured["system"]
+    assert "axial_consistency" in sys_text
+    assert "iteration" in sys_text.lower()
+
+
+def test_orchestrator_only_runs_fixit_when_persistence_detected():
+    """fixit is in the registry but should NOT run in normal
+    iterations. It fires only when prior_defects shows persistence."""
+    from fastcad.agent.critics import fixit
+    fixit_calls = {"n": 0}
+    def fake_fixit_review(**kwargs):
+        fixit_calls["n"] += 1
+        return []
+    with patch.object(fixit, "review", fake_fixit_review):
+        # No prior defects → fixit must NOT run.
+        critics.review_all(
+            spec_source="x", cache_md="x", user_prompt="x",
+            bbox=(0, 0, 0, 1, 1, 1),
+            client_factory=lambda: _FakeClient(json.dumps({"defects": []})),
+            render_fn=_render_fn_returning(_renders()),
+            prior_defects=None,
+        )
+        assert fixit_calls["n"] == 0
+
+        # Persistent prior defects → fixit DOES run.
+        persistent = [[{"where": "axial_consistency"}]] * 3
+        critics.review_all(
+            spec_source="x", cache_md="x", user_prompt="x",
+            bbox=(0, 0, 0, 1, 1, 1),
+            client_factory=lambda: _FakeClient(json.dumps({"defects": []})),
+            render_fn=_render_fn_returning(_renders()),
+            prior_defects=persistent,
+        )
+        assert fixit_calls["n"] == 1
+
+
 def test_parse_defects_handles_prose_around_json():
     text = "Here is my analysis.\n\n{\"defects\":[{\"severity\":\"error\",\"where\":\"x\",\"what\":\"y\",\"hint\":\"z\"}]}\n\nDone."
     out = _common.parse_defects(text, "test")

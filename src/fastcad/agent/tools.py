@@ -497,8 +497,20 @@ def _run_structural_validation(
                 bbox,
                 on_progress=on_progress,
                 persist_slug=slug,
+                # Pass the recent history so the orchestrator can
+                # decide whether to escalate (P7/P8 fix-it critic).
+                prior_defects=list(session.defect_history),
             )
             defects.extend(vision_defects)
+
+    # P7/P8: record this iteration's defects for next-iteration
+    # persistence detection. We append even when defects is empty
+    # so the streak gap is visible. Cap history length so the
+    # session doesn't grow unboundedly.
+    history_entry = [d.to_dict() for d in defects]
+    session.defect_history.append(history_entry)
+    if len(session.defect_history) > 16:
+        session.defect_history = session.defect_history[-16:]
 
     if on_progress is not None and not defects:
         on_progress({"type": "validation_pass", "slug": slug})

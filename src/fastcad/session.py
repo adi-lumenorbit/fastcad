@@ -31,6 +31,12 @@ class SessionState:
     # validators auto-look-up against it. Cleared on reset; populated
     # by the read_research dispatch handler.
     last_research_slug: str | None = None
+    # Stage 3 / P7-P8: per-set_source defect history within this
+    # session. Each entry is the list of Defect (dicts) that fired
+    # after one set_source. The orchestrator inspects the tail to
+    # decide whether to escalate (P7) or invoke the fix-it critic
+    # (P8). Cleared on reset.
+    defect_history: list[list[dict]] = field(default_factory=list)
 
     def reset(self) -> None:
         self.current_source = INITIAL_SOURCE
@@ -38,6 +44,7 @@ class SessionState:
         self.redo_stack.clear()
         self.cache.clear()
         self.last_research_slug = None
+        self.defect_history.clear()
 
     def can_undo(self) -> bool:
         return bool(self.undo_stack)
