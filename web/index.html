@@ -48,6 +48,8 @@
         <div id="progress-panel" data-testid="progress-panel" role="log" aria-live="polite"></div>
       </div>
       <form id="chat-form">
+        <span id="agent-status" data-testid="agent-status"
+              data-state="idle" title="Agent state: idle">●</span>
         <input id="chat-input" data-testid="chat-input" type="text"
                autocomplete="off" placeholder="Try: make a 20mm cube" />
         <button id="chat-send-btn" data-testid="chat-send-btn" type="submit">Send</button>

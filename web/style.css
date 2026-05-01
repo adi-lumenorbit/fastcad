@@ -254,6 +254,35 @@ html, body {
   border-top: 1px solid #333;
 }
 
+#agent-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: auto;
+  padding: 0 6px;
+  font-size: 14px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  background: #1a1a1a;
+  color: #555;
+  user-select: none;
+  transition: color 0.1s;
+}
+
+#agent-status[data-state="thinking"] {
+  color: #d4d4aa;
+}
+
+#agent-status[data-state="stuck"] {
+  color: #d77;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1.0; }
+  50%      { opacity: 0.4; }
+}
+
 #chat-input {
   flex: 1;
   padding: 10px;

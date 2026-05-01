@@ -70,11 +70,25 @@ def _scene_delta(ctx: WSContext, added: list[str], updated: list[str], removed: 
 async def _send(ws: WebSocket, ctx: WSContext, payload: dict) -> None:
     """All outbound WS sends go through here. The lock serialises
     concurrent emissions (agent turn body + progress events scheduled
-    from worker threads) so frames stay coherent."""
+    from worker threads) so frames stay coherent.
+
+    Send-after-close: a long-running agent turn may still be flushing
+    progress events when the client disconnects (page close, network
+    drop, fresh empirical run). Swallow those errors — the alternative
+    is that one stale send aborts the whole turn server-side and
+    poisons the next iteration's state. The ws_log entry still goes
+    in so the feedback bundle records what would have been sent."""
     async with ctx.send_lock:
         ctx.ws_log.append({"dir": "out", "t": time.time(), "type": payload.get("type"),
                            "summary": _summary(payload)})
-        await ws.send_text(json.dumps(payload))
+        try:
+            await ws.send_text(json.dumps(payload))
+        except RuntimeError:
+            # Starlette raises RuntimeError after a close has been
+            # sent. Treat as benign; the client is gone.
+            pass
+        except WebSocketDisconnect:
+            pass
 
 
 def _summary(payload: dict) -> dict:

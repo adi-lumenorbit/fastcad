@@ -37,6 +37,31 @@ def test_progress_panel_populates_on_prompt(live_server: str, page) -> None:
     assert "set_source" in text
 
 
+def test_agent_status_transitions_idle_to_thinking_to_idle(live_server: str, page) -> None:
+    """Sending a prompt flips status to 'thinking'; the agent's
+    final message flips it back to 'idle'."""
+    page.goto(live_server + "/")
+    page.wait_for_function("window.fastcad && window.fastcad.ready === true")
+
+    # Initial state.
+    assert page.evaluate("window.fastcad.agentStatus()") == "idle"
+
+    page.fill("[data-testid=chat-input]", "Make a 20mm cube")
+    page.click("[data-testid=chat-send-btn]")
+
+    # Briefly thinking immediately after submit.
+    page.wait_for_function(
+        "() => window.fastcad.agentStatus() === 'thinking'",
+        timeout=2000,
+    )
+
+    # When the agent's final message arrives, status flips back.
+    page.wait_for_function(
+        "() => window.fastcad.agentStatus() === 'idle'",
+        timeout=8000,
+    )
+
+
 def test_progress_panel_clear_button(live_server: str, page) -> None:
     page.goto(live_server + "/")
     page.wait_for_function("window.fastcad && window.fastcad.ready === true")

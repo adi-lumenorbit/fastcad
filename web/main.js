@@ -207,6 +207,8 @@ function showAsk(question, options) {
       addMessage("user", opt);
       send({ type: "user_choice", text: opt });
       clearAsk();
+      setAgentStatus("thinking");
+      bumpStuckTimer();
     });
     opts.appendChild(b);
   }
@@ -253,14 +255,33 @@ function handleServerMessage(payload) {
   switch (payload.type) {
     case "scene_init": applySceneInit(payload); break;
     case "scene_delta": applySceneDelta(payload); break;
-    case "agent_message": addMessage("agent", payload.text); break;
-    case "ask_user": showAsk(payload.question, payload.options); break;
+    case "agent_message":
+      addMessage("agent", payload.text);
+      // Final assistant message = end of turn.
+      setAgentStatus("idle");
+      break;
+    case "ask_user":
+      showAsk(payload.question, payload.options);
+      // Waiting on the user, not the agent.
+      setAgentStatus("idle");
+      break;
     case "tool_log":
       for (const c of payload.calls) addMessage("tool", `${c.name}(${formatToolArgs(c.args)})`);
       break;
-    case "progress": handleProgress(payload); break;
+    case "progress":
+      handleProgress(payload);
+      // Any progress event = agent is doing something. Reset stuck
+      // timer; keep state as thinking.
+      if (agentStatus && agentStatus.dataset.state !== "idle") {
+        setAgentStatus("thinking");
+        bumpStuckTimer();
+      }
+      break;
     case "scad": exportScad(payload.source); break;
-    case "error": addMessage("agent", `[error] ${payload.message}`); break;
+    case "error":
+      addMessage("agent", `[error] ${payload.message}`);
+      setAgentStatus("idle");
+      break;
   }
 }
 
@@ -420,6 +441,55 @@ if (progressClearBtn) {
 }
 
 // ---------------------------------------------------------------------------
+// Agent status indicator — visual cue for thinking / idle / stuck.
+// Cycles a braille spinner glyph while the agent's working; goes red-pulse
+// when no progress event arrives for 30s.
+// ---------------------------------------------------------------------------
+
+const agentStatus = document.getElementById("agent-status");
+const SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+let spinnerIdx = 0;
+let spinnerInterval = null;
+let stuckTimer = null;
+const STUCK_AFTER_MS = 30000;
+
+function setAgentStatus(state) {
+  if (!agentStatus) return;
+  agentStatus.dataset.state = state;
+  agentStatus.title = `Agent state: ${state}`;
+  if (state === "thinking") {
+    if (!spinnerInterval) {
+      spinnerInterval = setInterval(() => {
+        spinnerIdx = (spinnerIdx + 1) % SPINNER_FRAMES.length;
+        agentStatus.textContent = SPINNER_FRAMES[spinnerIdx];
+      }, 100);
+    }
+  } else {
+    if (spinnerInterval) {
+      clearInterval(spinnerInterval);
+      spinnerInterval = null;
+    }
+    agentStatus.textContent = state === "stuck" ? "⚠" : "●";
+  }
+}
+
+function bumpStuckTimer() {
+  if (stuckTimer) clearTimeout(stuckTimer);
+  stuckTimer = setTimeout(() => {
+    if (agentStatus && agentStatus.dataset.state === "thinking") {
+      setAgentStatus("stuck");
+    }
+  }, STUCK_AFTER_MS);
+}
+
+setAgentStatus("idle");
+
+// Test hook
+if (window.fastcad) {
+  window.fastcad.agentStatus = () => agentStatus ? agentStatus.dataset.state : null;
+}
+
+// ---------------------------------------------------------------------------
 // Resizable chat-log / progress-pane split. Drag the #pane-divider to
 // rebalance; CSS reads --pane-split (a percentage) on #chat-pane.
 // ---------------------------------------------------------------------------
@@ -506,6 +576,8 @@ chatForm.addEventListener("submit", (ev) => {
   addMessage("user", text);
   send({ type: "prompt", text });
   chatInput.value = "";
+  setAgentStatus("thinking");
+  bumpStuckTimer();
 });
 
 document.getElementById("undo-btn").addEventListener("click", () => send({ type: "undo" }));
