@@ -58,12 +58,34 @@ format exactly. Constraints:
   geometry. Pick generous tolerances (±5% on dimensions, ±15% on
   volume) — manifold tessellation introduces noise. The schema is
   documented in `docs/research/README.md`.
+- **The `## Implementation guidance` section is mandatory.** It's
+  free-form prose + OpenSCAD snippets describing the canonical
+  construction pattern for THIS part type — not a complete model,
+  but the key idiomatic moves. The modeling agent reads this every
+  turn and uses it as a starting template.
+
+  Cover at minimum, where applicable:
+    - The construction pattern for any helical / swept / revolved
+      feature (thread cross-section shape, the `linear_extrude`
+      twist + slices formula, ridge-vs-groove orientation).
+    - Module decomposition the agent should aim for (head + shank
+      + thread + drive recess, or flange + bore + bolt-circle, etc.).
+    - Common construction pitfalls to AVOID for this part type
+      (e.g. "do not use difference() to carve threads from a major-
+      diameter cylinder; use union() of a minor-diameter core +
+      a single helical ridge").
+
+  The guidance must be concrete enough that an OpenSCAD agent who
+  reads it can write working code on their first try. Use real
+  parameter names (`major`, `minor`, `pitch`, `length`) tied to
+  the dimensions in the same file.
+
 - Output the markdown file. Do not produce code, do not produce
   other artifacts, do not modify any other file in the repo.
 
-When the file is written and well-formed (including a parseable
-JSON Acceptance block), you are done. Print one line confirming the
-slug and stop.
+When the file is written and well-formed (parseable JSON Acceptance
+block AND a non-trivial Implementation guidance section), you are
+done. Print one line confirming the slug and stop.
 """
 
 

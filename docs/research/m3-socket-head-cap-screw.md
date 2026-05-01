@@ -104,6 +104,91 @@ the numbers a few percent. Sized for an M3 × 20 cap screw.
 }
 ```
 
+## Implementation guidance
+
+A socket head cap screw decomposes naturally into three sub-modules
+plus an assembling top-level module:
+
+- `module thread_xs()` — the 2D thread cross-section, swept later by
+  `linear_extrude(twist=…)`.
+- `module shaft()` — the threaded shank, built by extruding
+  `thread_xs()` over the full thread length.
+- `module head()` — the cylindrical socket head with the hex socket
+  recess subtracted from the top.
+- `module screw()` — `union()` of `shaft()` and a translated
+  `head()`. This is the only top-level call.
+
+**Helical thread construction (the part agents most often get
+wrong).** A correct ISO single-start thread is built by extruding a
+2D cross-section that is **the minor-diameter circle PLUS one
+triangular tooth on the +X side**, then twisting that profile around
+Z as Z rises. Concretely:
+
+```
+module thread_xs() {
+  // Minor-diameter core PLUS a single radial tooth at azimuth 0.
+  union() {
+    circle(d = minor);
+    translate([minor / 2, 0])
+      polygon([
+        [0,                 -pitch / 4],
+        [(major - minor)/2,  0       ],
+        [0,                  pitch / 4]
+      ]);
+  }
+}
+
+module shaft() {
+  linear_extrude(
+    height = length,
+    twist  = 360 * length / pitch,   // RH thread; negate for LH
+    slices = max(64, abs(360 * length / pitch) / 5)
+  )
+    thread_xs();
+}
+```
+
+The cross-section is `union()` of (small circle + one triangle), NOT
+`difference()` of (big circle − one triangle). The latter produces
+inverted geometry — a smooth shaft with a thin spiral *groove* — and
+is wrong.
+
+`slices = |twist| / 5` (≥ 64) gives ~5° of rotation per slice, which
+keeps the helix smooth. With pitch = 0.5 and length = 20 that's
+14400°/5 ≈ 2880 slices.
+
+**Hex socket.** OpenSCAD's `cylinder(d=…, $fn=6)` produces a hex
+prism whose `d` is the **across-corners** diameter, not the
+across-flats (s) value the standard quotes. Convert:
+`across_corners = s / cos(30°)`. Place the socket via `difference()`
+on the head with `translate([0, 0, head_h - socket_depth])
+cylinder(d = across_corners, h = socket_depth + 0.01, $fn = 6)`. The
+`+0.01` epsilon prevents z-fighting at the top face.
+
+**Pitfalls to AVOID.**
+
+- **Stacked rings.** Building the thread with `for (i = [0:N])
+  translate([0, 0, i*pitch]) rotate([0, 0, i*step]) ...` produces
+  visible discrete rings, not a continuous helix. Always use a
+  single `linear_extrude(twist=...)` over the full length.
+- **Multi-start thread.** A cross-section with N teeth around the
+  circle gives an N-start thread. Standard ISO threads are single-
+  start. Use exactly ONE tooth (one `translate([minor/2, 0])
+  polygon(...)`) in `thread_xs()`.
+- **Hairline thread.** If the polygon points are colinear (e.g.
+  `[[0,0],[major-minor,0],[0,0]]`) the tooth has zero area and the
+  thread renders as a paper-thin fin. The polygon must form a real
+  triangle: three non-colinear points.
+- **Inverted thread (cylinder − groove).** As above, `union()` of
+  a minor-diameter core + ridge, NOT `difference()` from a major
+  cylinder.
+- **Hex-socket sizing.** As above, distinguish across-flats from
+  across-corners; OpenSCAD's `cylinder($fn=6)` uses across-corners.
+
+**Parameter names** — use these (matching the dimension table):
+`major`, `minor`, `pitch`, `length`, `head_d`, `head_h`, `socket_af`,
+`socket_depth`. Set `$fn = 64` at the top.
+
 Notes:
 - **bbox_z_extent** = 20mm shaft + 3mm head ± slack for placement
   (some agents put the screw tip at z = -1, others at z = 0).

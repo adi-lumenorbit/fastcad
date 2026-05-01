@@ -69,6 +69,13 @@ socket head cap screw, M-series">
 ```json
 { … structural validator schema … }
 ```
+
+## Implementation guidance
+
+Free-form prose + OpenSCAD snippets describing the canonical
+construction pattern for this part type. The modeling agent reads
+this every turn and uses it as a starting template. See the section
+below for what to include.
 ```
 
 Notes:
@@ -129,6 +136,46 @@ Field meanings:
 Use generous tolerances: ±5% on dimensions, ±15% on volume.
 Manifold tessellation introduces small numerical noise; tight
 tolerances produce false-failures.
+
+## Implementation guidance section (Stage 3 / construction template)
+
+Required for new entries. Distinct from the dimension table, which
+says *what the part is*; the implementation guidance says *how to
+build it in OpenSCAD*. Covers the construction idioms an agent
+needs to write working code on the first try, without us hardcoding
+worked examples in the system prompt.
+
+What to put in `## Implementation guidance`:
+
+- **Module decomposition.** What sub-modules the agent should
+  create for THIS part class. For a fastener: head + shank + thread
+  + drive recess. For a flanged bushing: flange + bore + outer
+  cylinder. For a stepper-motor mount: bolt-circle pattern + bore
+  + body. The agent reads the list and uses it as a skeleton.
+- **The canonical construction pattern for any helical / swept /
+  revolved feature.** Especially: the `linear_extrude` cross-
+  section shape, the `twist` and `slices` formulas, ridge-vs-groove
+  orientation. (This is the blind spot agents repeatedly hit on
+  threads.)
+- **Common pitfalls to AVOID for this part type.** "Do NOT use
+  difference() to carve threads from a major-diameter cylinder; use
+  union() of a minor-diameter core + one helical ridge." "Do NOT
+  emit `cylinder(...,$fn=6)` for a hex socket without converting
+  across-flats to across-corners; the polygon size is wrong by a
+  factor of 1/cos(30°)." Concrete, with reasoning.
+- **Parameter names.** Tie OpenSCAD identifier suggestions to the
+  dimension table above, so the agent's source uses the same names
+  the cache uses. Keeps the cross-references obvious.
+
+What does NOT belong here:
+- A complete, copy-pasteable model. The agent writes the full
+  source; the guidance is the *skeleton + idioms*, not the body.
+- Hardcoded numeric values. Reference dimensions by name (use
+  `pitch`, not `0.5`).
+
+The research subagent generates this section per-part from training
++ web sources. For older cache entries that lack it, the validator
+opts out gracefully (no guidance = agent works without a template).
 
 ## What does NOT belong here
 

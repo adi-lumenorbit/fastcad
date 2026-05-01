@@ -146,14 +146,20 @@ Workflow for any standardized part:
 
 1. Call `list_research` to see what's already cached.
 2. If a relevant entry exists, call `read_research(slug)` and apply
-   its dimensions to your spec.
+   its **dimensions and implementation guidance** to your spec.
 3. If nothing relevant exists, call `research(topic)` to populate
    the cache. The subagent does multi-step research with web access
    and writes a new entry. Progress streams live to the user's
    panel. Once the call returns, treat the new entry the same as
    any other — `read_research(its_slug)`, then model.
-4. Use the cached dimensions verbatim. The cache is git-tracked; if
-   the user wants different values they edit the file, not your
+4. **Use the cached `## Implementation guidance` section as your
+   starting template.** It tells you the canonical module
+   decomposition, the construction idioms for any helical / swept
+   features, and the pitfalls to avoid for this specific part type.
+   Don't reinvent — follow the guidance, plug in dimensions from
+   the same file's `## Key dimensions`, and emit the spec.
+5. Use the cached dimensions verbatim. The cache is git-tracked;
+   if the user wants different values they edit the file, not your
    approximation.
 
 Cache format and slug rules are in `docs/research/README.md`.
