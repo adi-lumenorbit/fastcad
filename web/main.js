@@ -174,11 +174,34 @@ const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const askArea = document.getElementById("ask-user-area");
 
-function addMessage(role, text) {
+function addMessage(role, text, details) {
   const div = document.createElement("div");
   div.className = `msg ${role}`;
-  div.textContent = text;
+  // Mark error-shaped agent messages so CSS can style them red.
+  // The convention is leading "[error]" — already used by the
+  // server's `error` WS message and by the WS close handler.
+  if (role === "agent" && typeof text === "string" && text.startsWith("[error]")) {
+    div.classList.add("error");
+  }
   div.dataset.role = role;
+  // Body text via textContent (XSS-safe). Optional `details` arg is
+  // a string; when present, render as a collapsible <details> block
+  // so the user can expand to see the underlying payload, WS close
+  // code, progress timeline, etc.
+  const body = document.createElement("span");
+  body.textContent = text;
+  div.appendChild(body);
+  if (typeof details === "string" && details.length > 0) {
+    const det = document.createElement("details");
+    det.className = "msg-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "Show details";
+    det.appendChild(summary);
+    const pre = document.createElement("pre");
+    pre.textContent = details;
+    det.appendChild(pre);
+    div.appendChild(det);
+  }
   chatLog.appendChild(div);
   chatLog.scrollTop = chatLog.scrollHeight;
 }
@@ -240,8 +263,25 @@ function connect() {
     window.fastcad.ready = true;
     document.body.dataset.wsState = "open";
   });
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (ev) => {
     document.body.dataset.wsState = "closed";
+    // Tell the user the connection died so the indicator stops
+    // pretending to "think". They have to refresh to recover.
+    setAgentStatus("disconnected");
+    // Surface the *cause* in chat too — otherwise the only sign of
+    // the disconnect is the indicator and the user has no idea why
+    // their last prompt produced nothing. The disclosure attaches
+    // recent WS messages so the user can see exactly how far the
+    // turn got before the drop.
+    const reason = ev && ev.reason ? `: ${ev.reason}` : "";
+    const code   = ev && ev.code ? ` [code ${ev.code}]` : "";
+    addMessage(
+      "agent",
+      `[error] Connection to server lost${code}${reason}. ` +
+      `Refresh the page to reconnect. If this happens repeatedly, ` +
+      `check the server log (journalctl -u fastcad).`,
+      buildDisconnectDetails(ev),
+    );
   });
   ws.addEventListener("message", (ev) => {
     let payload;
@@ -262,24 +302,33 @@ function handleServerMessage(payload) {
       break;
     case "ask_user":
       showAsk(payload.question, payload.options);
-      // Waiting on the user, not the agent.
-      setAgentStatus("idle");
+      // Agent paused on you — distinct from idle so the user can
+      // tell at a glance "it's my move now" vs "nothing to do".
+      setAgentStatus("waiting");
       break;
     case "tool_log":
       for (const c of payload.calls) addMessage("tool", `${c.name}(${formatToolArgs(c.args)})`);
       break;
-    case "progress":
+    case "progress": {
       handleProgress(payload);
       // Any progress event = agent is doing something. Reset stuck
-      // timer; keep state as thinking.
-      if (agentStatus && agentStatus.dataset.state !== "idle") {
+      // timer; keep state as thinking. Only flip out of `waiting`
+      // when fresh progress arrives — that means the agent has
+      // resumed after the user's reply.
+      const cur = agentStatus && agentStatus.dataset.state;
+      if (cur !== "idle") {
         setAgentStatus("thinking");
         bumpStuckTimer();
       }
       break;
+    }
     case "scad": exportScad(payload.source); break;
     case "error":
-      addMessage("agent", `[error] ${payload.message}`);
+      addMessage(
+        "agent",
+        `[error] ${payload.message}`,
+        buildErrorDetails(payload),
+      );
       setAgentStatus("idle");
       break;
   }
@@ -441,27 +490,52 @@ if (progressClearBtn) {
 }
 
 // ---------------------------------------------------------------------------
-// Agent status indicator — visual cue for thinking / idle / stuck.
-// Cycles a braille spinner glyph while the agent's working; goes red-pulse
-// when no progress event arrives for 30s.
+// Agent status indicator — visual cue for what the agent is doing.
+// Five states with distinct glyphs, colors, and labels:
+//
+//   idle         ●  gray      "Idle"                 — nothing pending.
+//   thinking     ⠋  yellow    "Thinking…"            — turn in flight.
+//   waiting      ◉  blue      "Waiting for you"      — agent paused
+//                                                        on ask_user.
+//   stuck        ⚠  red pulse "Stuck (no progress)"  — long silence.
+//   disconnected ○  orange    "Disconnected — refresh" — WS dropped.
+//
+// The label text is what the user reads. The glyph is decoration.
 // ---------------------------------------------------------------------------
 
 const agentStatus = document.getElementById("agent-status");
+const agentStatusGlyph = agentStatus && agentStatus.querySelector(".glyph");
+const agentStatusLabel = agentStatus && agentStatus.querySelector(".label");
 const SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
 let spinnerIdx = 0;
 let spinnerInterval = null;
 let stuckTimer = null;
-const STUCK_AFTER_MS = 30000;
+// 90s — long enough that a research-subagent + critic round-trip
+// completes naturally without tripping the stuck warning.
+const STUCK_AFTER_MS = 90000;
+
+const STATUS_DESCRIPTIONS = {
+  "idle":         { glyph: "●", label: "Idle" },
+  "thinking":     { glyph: "⠋", label: "Thinking…" },
+  "waiting":      { glyph: "◉", label: "Waiting for you" },
+  "stuck":        { glyph: "⚠", label: "Stuck — no progress for 90s" },
+  "disconnected": { glyph: "○", label: "Disconnected — refresh" },
+};
+const _agentStatusHistory = [];
 
 function setAgentStatus(state) {
   if (!agentStatus) return;
+  const desc = STATUS_DESCRIPTIONS[state] || STATUS_DESCRIPTIONS.idle;
   agentStatus.dataset.state = state;
-  agentStatus.title = `Agent state: ${state}`;
+  agentStatus.title = desc.label;
+  if (agentStatusLabel) agentStatusLabel.textContent = desc.label;
+  _agentStatusHistory.push(state);
+  if (_agentStatusHistory.length > 100) _agentStatusHistory.splice(0, 50);
   if (state === "thinking") {
     if (!spinnerInterval) {
       spinnerInterval = setInterval(() => {
         spinnerIdx = (spinnerIdx + 1) % SPINNER_FRAMES.length;
-        agentStatus.textContent = SPINNER_FRAMES[spinnerIdx];
+        if (agentStatusGlyph) agentStatusGlyph.textContent = SPINNER_FRAMES[spinnerIdx];
       }, 100);
     }
   } else {
@@ -469,7 +543,7 @@ function setAgentStatus(state) {
       clearInterval(spinnerInterval);
       spinnerInterval = null;
     }
-    agentStatus.textContent = state === "stuck" ? "⚠" : "●";
+    if (agentStatusGlyph) agentStatusGlyph.textContent = desc.glyph;
   }
 }
 
@@ -484,9 +558,139 @@ function bumpStuckTimer() {
 
 setAgentStatus("idle");
 
-// Test hook
+// Test hook. `agentStatusHistory` records every transition (capped
+// at 100) so e2e can assert sequences even when intermediate states
+// are too short-lived for polling to catch.
 if (window.fastcad) {
   window.fastcad.agentStatus = () => agentStatus ? agentStatus.dataset.state : null;
+  window.fastcad.agentStatusHistory = () => _agentStatusHistory.slice();
+}
+
+
+// ---------------------------------------------------------------------------
+// Error-detail formatters — populate the `<details>` disclosure on
+// `[error]` chat messages so the user can see what actually happened.
+// ---------------------------------------------------------------------------
+
+function buildErrorDetails(payload) {
+  // Server-side `error` message. Include the full payload + the most
+  // recent few WS log entries so the user has the request → response
+  // sequence handy.
+  const lines = [
+    `time: ${new Date().toISOString()}`,
+    `payload: ${JSON.stringify(payload, null, 2)}`,
+    "",
+    "recent ws messages:",
+    ...recentWsLogLines(10),
+  ];
+  return lines.join("\n");
+}
+
+function buildDisconnectDetails(ev) {
+  const lines = [
+    `time: ${new Date().toISOString()}`,
+    `close code: ${ev && ev.code}`,
+    `close reason: ${(ev && ev.reason) || "(none provided)"}`,
+    `was clean: ${ev && ev.wasClean}`,
+    "",
+    "recent ws messages (oldest first):",
+    ...recentWsLogLines(20),
+  ];
+  return lines.join("\n");
+}
+
+function recentWsLogLines(n) {
+  const tail = wsLog.slice(-n);
+  return tail.map((entry) => {
+    const ts = new Date(entry.t).toISOString().slice(11, 23);
+    const summary = entry.summary
+      ? JSON.stringify(entry.summary).slice(0, 200)
+      : "";
+    return `  ${ts} ${entry.dir.padEnd(3)} ${entry.type}${summary ? "  " + summary : ""}`;
+  });
+}
+
+
+// ---------------------------------------------------------------------------
+// Chat input history — up/down arrows scroll through previous prompts,
+// like a shell's readline. Persisted in localStorage so it survives
+// reloads. Capped to the last 50 entries.
+// ---------------------------------------------------------------------------
+
+const INPUT_HISTORY_KEY = "fastcad.chatHistory";
+const INPUT_HISTORY_MAX = 50;
+
+let inputHistory = [];
+try {
+  const saved = localStorage.getItem(INPUT_HISTORY_KEY);
+  if (saved) inputHistory = JSON.parse(saved) || [];
+} catch (_) { /* ignore */ }
+
+// `historyCursor` is null when the user is editing fresh text. When
+// they hit ArrowUp it becomes an index into `inputHistory` (counting
+// from the end). `historyDraft` snapshots whatever they had typed
+// before they started navigating, so ArrowDown back to the bottom
+// restores it.
+let historyCursor = null;
+let historyDraft = "";
+
+function pushHistory(text) {
+  if (!text) return;
+  // Don't insert duplicate of the most-recent entry — typing the
+  // same prompt twice in a row shouldn't bloat history.
+  if (inputHistory[inputHistory.length - 1] === text) return;
+  inputHistory.push(text);
+  if (inputHistory.length > INPUT_HISTORY_MAX) {
+    inputHistory.splice(0, inputHistory.length - INPUT_HISTORY_MAX);
+  }
+  try {
+    localStorage.setItem(INPUT_HISTORY_KEY, JSON.stringify(inputHistory));
+  } catch (_) { /* ignore quota / private mode */ }
+  historyCursor = null;
+  historyDraft = "";
+}
+
+function navigateHistory(direction) {
+  if (inputHistory.length === 0) return;
+  if (historyCursor === null) {
+    if (direction !== -1) return;   // ArrowDown at fresh-text does nothing.
+    historyDraft = chatInput.value;
+    historyCursor = inputHistory.length - 1;
+  } else {
+    historyCursor += direction;     // -1 = older, +1 = newer
+    if (historyCursor < 0) historyCursor = 0;
+    if (historyCursor >= inputHistory.length) {
+      // Past the newest → restore the fresh draft.
+      historyCursor = null;
+      chatInput.value = historyDraft;
+      // Cursor at end after restore.
+      requestAnimationFrame(() => {
+        chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+      });
+      return;
+    }
+  }
+  chatInput.value = inputHistory[historyCursor];
+  // Move cursor to end so subsequent typing appends, mimicking shell.
+  requestAnimationFrame(() => {
+    chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+  });
+}
+
+if (chatInput) {
+  chatInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowUp") {
+      navigateHistory(-1);
+      ev.preventDefault();
+    } else if (ev.key === "ArrowDown") {
+      navigateHistory(+1);
+      ev.preventDefault();
+    } else if (ev.key !== "Enter") {
+      // Any other keystroke = user is editing again. Cancel the
+      // history-navigation cursor so a future ArrowUp starts fresh.
+      historyCursor = null;
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +786,7 @@ chatForm.addEventListener("submit", (ev) => {
   if (!text) return;
   addMessage("user", text);
   send({ type: "prompt", text });
+  pushHistory(text);
   chatInput.value = "";
   setAgentStatus("thinking");
   bumpStuckTimer();
