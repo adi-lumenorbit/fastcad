@@ -14,14 +14,40 @@ html, body {
 }
 
 #app {
-  display: grid;
-  grid-template-columns: 1fr 380px;
+  display: flex;
+  flex-direction: row;
   height: 100vh;
+  /* Right pane width (the chat / progress side). The vertical
+     divider drag updates this CSS variable; layout is otherwise
+     fully fluid. */
+  --right-pane-width: 380px;
 }
 
 #viewer-pane {
   position: relative;
   background: #2a2a2a;
+  flex: 1 1 auto;
+  /* Min-width keeps the viewer usable even when the user has
+     dragged the chat pane very wide. */
+  min-width: 200px;
+  overflow: hidden;
+}
+
+/* Drag handle between viewer and chat-pane. JS in main.js wires
+   pointer events to incrementally resize the right-pane width. */
+#app-divider {
+  flex: 0 0 6px;
+  background: #2a2a2a;
+  border-left: 1px solid #1a1a1a;
+  border-right: 1px solid #1a1a1a;
+  cursor: col-resize;
+  user-select: none;
+  transition: background 0.1s;
+}
+
+#app-divider:hover,
+#app-divider.dragging {
+  background: #4a4a4a;
 }
 
 #viewer {
@@ -75,11 +101,18 @@ html, body {
 #chat-pane {
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #333;
   background: #202020;
+  /* Width is controlled by the vertical divider (JS sets the
+     `--right-pane-width` CSS variable on `#app`). flex-shrink: 0
+     means the right pane doesn't get squeezed when the viewer
+     wants more space — only the divider drag changes its size. */
+  width: var(--right-pane-width, 380px);
+  flex-shrink: 0;
   /* Constrain to viewport so children's flex sizing & overflow work. */
   min-height: 0;
   overflow: hidden;
+  min-width: 280px;
+  max-width: 80vw;
 }
 
 #chat-log {

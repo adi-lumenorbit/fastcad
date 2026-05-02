@@ -752,70 +752,158 @@ if (chatInput) {
 }
 
 // ---------------------------------------------------------------------------
-// Resizable chat-log / progress-pane split. Drag the #pane-divider to
-// rebalance; CSS reads --pane-split (a percentage) on #chat-pane.
+// Resizable splits — both the vertical viewer/chat divider and the
+// horizontal chat-log/progress-pane divider share the same drag
+// machinery. The handler is movementX/movementY based: each pointer
+// move adds the per-event delta to the current size, with a clamp.
+// This avoids the dead-zone bug of the previous "anchored" approach
+// (where dragging past the clamp and reversing left a gap before the
+// divider tracked the cursor again — visible as the cursor "jumping"
+// because the divider stayed put while the cursor came back).
 // ---------------------------------------------------------------------------
 
-const paneDivider = document.getElementById("pane-divider");
-const chatPane = document.getElementById("chat-pane");
-
-if (paneDivider && chatPane) {
+function makeResizable({ divider, axis, getSize, setSize, storageKey }) {
+  if (!divider) return;
   let dragging = false;
-  let dragStartY = 0;
-  let dragStartPct = 60;
-
-  function setSplit(pct) {
-    // Clamp so neither pane disappears entirely.
-    const clamped = Math.max(15, Math.min(85, pct));
-    chatPane.style.setProperty("--pane-split", String(clamped));
-    try {
-      localStorage.setItem("fastcad.paneSplit", String(clamped));
-    } catch (_) { /* private mode etc. — ignore */ }
-  }
 
   // Restore last drag position across reloads.
   try {
-    const saved = localStorage.getItem("fastcad.paneSplit");
-    if (saved !== null) setSplit(parseFloat(saved));
+    const saved = localStorage.getItem(storageKey);
+    if (saved !== null) setSize(parseFloat(saved));
   } catch (_) { /* ignore */ }
+
+  function applyAndSave(value) {
+    const stored = setSize(value);
+    if (stored == null) return;
+    try { localStorage.setItem(storageKey, String(stored)); }
+    catch (_) { /* ignore */ }
+  }
 
   function startDrag(ev) {
     dragging = true;
-    // Anchor the drag at the cursor's current position so the divider
-    // tracks the cursor instead of jumping to wherever (clientY-rect.top)
-    // happens to map. Store initial cursor-Y and the current split %;
-    // subsequent moves apply (cursorY - startY) as a delta in %.
-    dragStartY = ev.clientY;
-    dragStartPct = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split")) || 60;
-    paneDivider.classList.add("dragging");
+    divider.classList.add("dragging");
     ev.preventDefault();
-    paneDivider.setPointerCapture(ev.pointerId);
+    divider.setPointerCapture(ev.pointerId);
   }
 
   function moveDrag(ev) {
     if (!dragging) return;
-    const rect = chatPane.getBoundingClientRect();
-    const deltaPct = ((ev.clientY - dragStartY) / rect.height) * 100;
-    setSplit(dragStartPct + deltaPct);
+    // movementX/Y is the delta since the previous pointermove. Adding
+    // it to the *current* size means clamps don't create dead zones —
+    // when the user reverses past a clamp, the divider follows the
+    // cursor immediately because it's reading current size, not a
+    // value frozen at drag-start.
+    const delta = axis === "x" ? ev.movementX : ev.movementY;
+    if (!delta) return;
+    applyAndSave(getSize() + delta);
   }
 
   function endDrag(ev) {
     if (!dragging) return;
     dragging = false;
-    paneDivider.classList.remove("dragging");
-    try { paneDivider.releasePointerCapture(ev.pointerId); } catch (_) { /* ignore */ }
+    divider.classList.remove("dragging");
+    try { divider.releasePointerCapture(ev.pointerId); } catch (_) { /* ignore */ }
   }
 
-  paneDivider.addEventListener("pointerdown", startDrag);
-  paneDivider.addEventListener("pointermove", moveDrag);
-  paneDivider.addEventListener("pointerup", endDrag);
-  paneDivider.addEventListener("pointercancel", endDrag);
+  divider.addEventListener("pointerdown", startDrag);
+  divider.addEventListener("pointermove", moveDrag);
+  divider.addEventListener("pointerup", endDrag);
+  divider.addEventListener("pointercancel", endDrag);
 
-  // Keyboard accessibility: arrow up/down nudges the split by 5%.
-  paneDivider.addEventListener("keydown", (ev) => {
-    const cur = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split")) || 60;
-    if (ev.key === "ArrowUp") { setSplit(cur - 5); ev.preventDefault(); }
-    else if (ev.key === "ArrowDown") { setSplit(cur + 5); ev.preventDefault(); }
+  // Keyboard accessibility: arrow keys nudge by 24 px.
+  divider.addEventListener("keydown", (ev) => {
+    const step = ev.shiftKey ? 60 : 24;
+    if (axis === "y" && ev.key === "ArrowUp")    { applyAndSave(getSize() - step); ev.preventDefault(); }
+    if (axis === "y" && ev.key === "ArrowDown")  { applyAndSave(getSize() + step); ev.preventDefault(); }
+    if (axis === "x" && ev.key === "ArrowLeft")  { applyAndSave(getSize() - step); ev.preventDefault(); }
+    if (axis === "x" && ev.key === "ArrowRight") { applyAndSave(getSize() + step); ev.preventDefault(); }
+  });
+}
+
+
+// Horizontal divider (chat-log / progress-pane). Size is stored as a
+// percentage on `--pane-split` (CSS reads `calc(var(--pane-split) * 1%)`
+// for chat-log's flex-basis). We map pointermove movementY → percent
+// of chatPane height each frame.
+const paneDivider = document.getElementById("pane-divider");
+const chatPane = document.getElementById("chat-pane");
+
+if (paneDivider && chatPane) {
+  const MIN_PCT = 15;
+  const MAX_PCT = 85;
+
+  const getPaneSplitPct = () => {
+    const v = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split"));
+    return Number.isFinite(v) ? v : 60;
+  };
+
+  // Convert a Y-pixel delta to a percent delta against the current
+  // chatPane height. Because we add *deltas* (not absolutes), there
+  // is no dead-zone when the clamp is hit.
+  let lastPct = getPaneSplitPct();
+
+  makeResizable({
+    divider: paneDivider,
+    axis: "y",
+    getSize: () => {
+      // For movementY-based math, we want size in *pixels* so the
+      // delta math doesn't have to convert each event. Use chatPane
+      // height × current%.
+      const h = chatPane.getBoundingClientRect().height || 1;
+      return getPaneSplitPct() * h / 100;
+    },
+    setSize: (px) => {
+      const h = chatPane.getBoundingClientRect().height || 1;
+      const pct = Math.max(MIN_PCT, Math.min(MAX_PCT, (px / h) * 100));
+      chatPane.style.setProperty("--pane-split", String(pct));
+      lastPct = pct;
+      return pct;
+    },
+    storageKey: "fastcad.paneSplit",
+  });
+}
+
+
+// Vertical divider (viewer / chat-pane). The convention used by
+// `makeResizable` is that `getSize()` returns the size of the pane
+// *before* the divider in the flex order — for the vertical divider
+// that's the viewer's width. `delta = movementX` is the number of
+// pixels the cursor moved right, which is also the number of pixels
+// the viewer should grow. We invert at storage time to keep the CSS
+// variable as right-pane width (which is what flex-shrink: 0 keys off).
+const appDivider = document.getElementById("app-divider");
+const appEl = document.getElementById("app");
+
+if (appDivider && appEl) {
+  const MIN_RIGHT_PX = 280;
+  // Cap so the viewer can never disappear entirely.
+  const maxRightPx = () => Math.max(MIN_RIGHT_PX, Math.floor(window.innerWidth * 0.8));
+  const getRightPx = () => {
+    const v = parseFloat(getComputedStyle(appEl).getPropertyValue("--right-pane-width"));
+    return Number.isFinite(v) ? v : 380;
+  };
+
+  makeResizable({
+    divider: appDivider,
+    axis: "x",
+    // Track viewer width = window width − right pane width.
+    getSize: () => Math.max(0, window.innerWidth - getRightPx()),
+    setSize: (viewerPx) => {
+      // Viewer grew → right pane shrunk by the same amount.
+      const right = window.innerWidth - viewerPx;
+      const clamped = Math.max(MIN_RIGHT_PX, Math.min(maxRightPx(), right));
+      appEl.style.setProperty("--right-pane-width", `${clamped}px`);
+      return clamped;
+    },
+    storageKey: "fastcad.rightPaneWidth",
+  });
+
+  // Ensure the saved width survives window resize: re-clamp on resize
+  // so a wider window doesn't leave us stuck at the old max.
+  window.addEventListener("resize", () => {
+    const cur = getRightPx();
+    const clamped = Math.max(MIN_RIGHT_PX, Math.min(maxRightPx(), cur));
+    if (clamped !== cur) appEl.style.setProperty("--right-pane-width", `${clamped}px`);
   });
 }
 
