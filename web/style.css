@@ -152,6 +152,14 @@ html, body {
   color: #f8b8b8;
 }
 
+/* Warnings (persistence detected, etc.) sit between info and error:
+   amber border + tinted bg. */
+#chat-log .msg.agent.warning {
+  background: #2a2210;
+  border-left: 3px solid #d4a05a;
+  color: #f0d8a8;
+}
+
 #chat-log .msg .msg-details {
   margin-top: 6px;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;

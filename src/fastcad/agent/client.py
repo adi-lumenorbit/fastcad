@@ -507,8 +507,49 @@ def _real_turn(
             turn.text = "\n".join(text_parts).strip() or None
             return turn
 
-    turn.text = "(agent stopped: max tool iterations exceeded)"
+        # Smart exit: if the structural validator has reported the same
+        # defect class on each of the last four iterations, the agent is
+        # stuck. The fix-it critic (P8) fires at the threshold of 3, so
+        # by 4 iterations of the same class we know it didn't help. End
+        # the turn with a clear explanation rather than running to the
+        # max_tool_iterations cap and dumping the generic message.
+        persistent = _detect_persistent_defects_inline(session.defect_history, 4)
+        if persistent:
+            turn.text = (
+                f"(agent stopped: defect class {persistent} has persisted "
+                f"across the last 4 iterations and the fix-it critic has "
+                f"already fired. The cache schema or guidance for this "
+                f"part may need adjustment, or the user can rephrase. "
+                f"Review the progress panel for the recurring defect.)"
+            )
+            return turn
+
+    turn.text = "(agent stopped: max tool iterations exceeded — see the progress panel for the loop the agent was stuck in)"
     return turn
+
+
+def _detect_persistent_defects_inline(history: list[list[dict]], threshold: int) -> list[str]:
+    """Same shape as `agent.critics.detect_persistent_defects`, inlined
+    here to avoid pulling the critics module on the hot path. Returns
+    the sorted list of `where`-prefix keys that appear in each of the
+    last `threshold` defect-list entries; empty when not persistent."""
+    if len(history) < threshold:
+        return []
+    recent = history[-threshold:]
+    if any(not it for it in recent):
+        return []
+    keys_per_iter: list[set[str]] = []
+    for defects in recent:
+        keys = set()
+        for d in defects:
+            where = str(d.get("where", ""))
+            key = where.split("[")[0] if "[" in where else where
+            keys.add(key)
+        keys_per_iter.append(keys)
+    intersection = keys_per_iter[0]
+    for k in keys_per_iter[1:]:
+        intersection &= k
+    return sorted(intersection)
 
 
 __all__ = ["AgentTurn", "run_turn", "_reset_fake"]

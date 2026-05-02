@@ -180,8 +180,11 @@ function addMessage(role, text, details, stats) {
   // Mark error-shaped agent messages so CSS can style them red.
   // The convention is leading "[error]" — already used by the
   // server's `error` WS message and by the WS close handler.
-  if (role === "agent" && typeof text === "string" && text.startsWith("[error]")) {
-    div.classList.add("error");
+  // [warning] gets the amber treatment for persistence + similar
+  // soft alerts that aren't fatal but the user should notice.
+  if (role === "agent" && typeof text === "string") {
+    if (text.startsWith("[error]")) div.classList.add("error");
+    else if (text.startsWith("[warning]")) div.classList.add("warning");
   }
   div.dataset.role = role;
   // Body text via textContent (XSS-safe). Optional `details` arg is
@@ -365,7 +368,13 @@ function handleServerMessage(payload) {
       setAgentStatus("waiting");
       break;
     case "tool_log":
-      for (const c of payload.calls) addMessage("tool", `${c.name}(${formatToolArgs(c.args)})`);
+      // Tool calls are surfaced live in the progress panel (with
+      // results, success/failure colors, and timing). The chat
+      // panel used to mirror them as args-only rows, but that
+      // was redundant + non-actionable (`set_source({"text":"<7058
+      // chars>"})` tells you nothing). We keep the WS payload for
+      // feedback bundles + ws_log inspection but render nothing
+      // in chat.
       break;
     case "progress": {
       handleProgress(payload);
@@ -450,6 +459,30 @@ function handleProgress(payload) {
   }
   if (t === "validation_pass") {
     appendProgressEntry("done", `✓ validation passed (${ev.slug})`);
+    return;
+  }
+
+  // Persistence detected — same defect class repeated N iterations.
+  // Surface prominently in both the progress panel and the chat so
+  // the user knows the agent is stuck instead of silently waiting
+  // for the iteration cap to hit.
+  if (t === "critics_escalation") {
+    const keys = (ev.persistent_keys || []).join(", ");
+    const fixit = ev.fixit_will_fire ? " — fix-it critic firing this iteration" : "";
+    const text = `⚠ persistent defects: ${keys || "(unspecified)"}${fixit}`;
+    appendProgressEntry("warning", text);
+    // Only post the chat banner once per turn. Track via a flag on
+    // window.fastcad so a fresh prompt resets it.
+    if (!window.fastcad._persistenceBannerShown) {
+      window.fastcad._persistenceBannerShown = true;
+      addMessage(
+        "agent",
+        `[warning] The agent has hit the same defect class ` +
+        `(${keys || "unspecified"}) on multiple iterations. ` +
+        `It may not converge on its own; you can wait, ` +
+        `or interrupt and rephrase the prompt.`,
+      );
+    }
     return;
   }
 
@@ -934,6 +967,8 @@ chatForm.addEventListener("submit", (ev) => {
   send({ type: "prompt", text });
   pushHistory(text);
   chatInput.value = "";
+  // Fresh turn → allow a new persistence banner if it triggers.
+  if (window.fastcad) window.fastcad._persistenceBannerShown = false;
   setAgentStatus("thinking");
   bumpStuckTimer();
 });

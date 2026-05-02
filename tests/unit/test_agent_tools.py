@@ -191,6 +191,45 @@ def test_cost_usd_unknown_model_returns_zero():
     assert _cost_usd("nonexistent-model", 1000, 2000, 0, 0) == 0.0
 
 
+def test_detect_persistent_defects_inline_matches_critics():
+    """The smart-exit copy of `detect_persistent_defects` must agree
+    with the canonical version in `agent.critics`. Same input, same
+    output."""
+    from fastcad.agent.client import _detect_persistent_defects_inline
+    from fastcad.agent.critics import detect_persistent_defects
+    history = [
+        [{"where": "axial_section.thread_profile"}, {"where": "connected_components"}],
+        [{"where": "axial_section.thread_profile"}, {"where": "bbox_z_extent"}],
+        [{"where": "axial_section.thread_profile"}, {"where": "axial_consistency"}],
+        [{"where": "axial_section.thread_profile"}, {"where": "connected_components"}],
+    ]
+    a = _detect_persistent_defects_inline(history, 4)
+    b = detect_persistent_defects(history, 4)
+    assert a == b == ["axial_section.thread_profile"]
+
+
+def test_detect_persistent_defects_inline_no_persistence():
+    from fastcad.agent.client import _detect_persistent_defects_inline
+    history = [
+        [{"where": "a"}],
+        [{"where": "b"}],
+        [{"where": "c"}],
+        [{"where": "d"}],
+    ]
+    assert _detect_persistent_defects_inline(history, 4) == []
+
+
+def test_detect_persistent_defects_inline_empty_iter_breaks_streak():
+    from fastcad.agent.client import _detect_persistent_defects_inline
+    history = [
+        [{"where": "x"}],
+        [],   # streak break
+        [{"where": "x"}],
+        [{"where": "x"}],
+    ]
+    assert _detect_persistent_defects_inline(history, 4) == []
+
+
 def test_dispatch_inspect_section_skip_polygons():
     s = _fresh()
     s.set_source("cube([5, 5, 5]);")
