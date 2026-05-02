@@ -174,7 +174,7 @@ const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const askArea = document.getElementById("ask-user-area");
 
-function addMessage(role, text, details) {
+function addMessage(role, text, details, stats) {
   const div = document.createElement("div");
   div.className = `msg ${role}`;
   // Mark error-shaped agent messages so CSS can style them red.
@@ -202,8 +202,66 @@ function addMessage(role, text, details) {
     det.appendChild(pre);
     div.appendChild(det);
   }
+  if (stats && typeof stats === "object") {
+    const footer = renderStatsFooter(stats);
+    if (footer) div.appendChild(footer);
+  }
   chatLog.appendChild(div);
   chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+
+function renderStatsFooter(stats) {
+  // Compact one-line summary appended after the agent's reply.
+  // Shows: $ spent, elapsed time, model + token totals (input/output
+  // and any cached). Hover for the full per-field breakdown.
+  const cost = typeof stats.cost_usd === "number" ? stats.cost_usd : 0;
+  const elapsed = typeof stats.elapsed_s === "number" ? stats.elapsed_s : 0;
+  const inT = stats.input_tokens || 0;
+  const outT = stats.output_tokens || 0;
+  const cR = stats.cache_read_tokens || 0;
+  const cC = stats.cache_create_tokens || 0;
+  const iters = stats.iterations || 0;
+  const model = stats.model || "";
+  // Skip the footer entirely if there's no signal to report (e.g.
+  // fake mode with zero tokens AND zero elapsed).
+  if (cost === 0 && elapsed === 0 && inT === 0 && outT === 0) return null;
+  const tokenSummary = cR > 0
+    ? `${inT}↑ ${outT}↓ ${cR} cached`
+    : `${inT}↑ ${outT}↓`;
+  const el = document.createElement("div");
+  el.className = "msg-stats";
+  el.dataset.testid = "agent-stats";
+  el.textContent = `${formatCost(cost)} · ${formatElapsed(elapsed)} · ${tokenSummary}`;
+  el.title = (
+    `model: ${model}\n` +
+    `cost: $${cost.toFixed(6)}\n` +
+    `elapsed: ${elapsed.toFixed(2)} s\n` +
+    `input tokens:    ${inT}\n` +
+    `output tokens:   ${outT}\n` +
+    `cache read:      ${cR}\n` +
+    `cache create:    ${cC}\n` +
+    `iterations:      ${iters}`
+  );
+  return el;
+}
+
+
+function formatCost(cost) {
+  // Sub-cent → mils; cent → cents; over a dollar → dollars-and-cents.
+  if (cost <= 0) return "$0";
+  if (cost < 0.01) return `${(cost * 1000).toFixed(2)}m¢`;  // 1.23m¢
+  if (cost < 1)    return `${(cost * 100).toFixed(2)}¢`;     // 23.45¢
+  return `$${cost.toFixed(2)}`;
+}
+
+
+function formatElapsed(s) {
+  if (s < 1)  return `${Math.round(s * 1000)} ms`;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  const mins = Math.floor(s / 60);
+  const secs = Math.round(s - mins * 60);
+  return `${mins}m ${secs}s`;
 }
 
 function clearAsk() {
@@ -296,7 +354,7 @@ function handleServerMessage(payload) {
     case "scene_init": applySceneInit(payload); break;
     case "scene_delta": applySceneDelta(payload); break;
     case "agent_message":
-      addMessage("agent", payload.text);
+      addMessage("agent", payload.text, undefined, payload.stats);
       // Final assistant message = end of turn.
       setAgentStatus("idle");
       break;

@@ -144,6 +144,20 @@ html, body {
   color: #b8b8b8;
 }
 
+/* Stats footer under each agent reply: $ spent · time · tokens.
+   Muted so it doesn't compete with the reply text; hover the line
+   for the full token breakdown via title. */
+#chat-log .msg .msg-stats {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px dotted #3a3a3a;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  color: #888;
+  user-select: text;
+  letter-spacing: 0.02em;
+}
+
 #chat-log .msg.tool {
   background: #1d3320;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;

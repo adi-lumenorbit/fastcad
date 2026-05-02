@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -27,11 +28,85 @@ ProgressCallback = Callable[[dict], None]
 
 
 @dataclass
+class TurnStats:
+    """Cost + timing for one user prompt → final assistant message.
+
+    Token counts are *cumulative* across all iterations of the
+    tool-use loop within the turn. `cost_usd` is computed at the
+    rates in `_PRICING`; if the model isn't in the table we report
+    0.0 and leave the raw tokens for the UI to display.
+    """
+    model: str = ""
+    elapsed_s: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_create_tokens: int = 0
+    cost_usd: float = 0.0
+    iterations: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "model": self.model,
+            "elapsed_s": round(self.elapsed_s, 3),
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_create_tokens": self.cache_create_tokens,
+            "cost_usd": round(self.cost_usd, 6),
+            "iterations": self.iterations,
+        }
+
+
+@dataclass
 class AgentTurn:
     text: str | None = None
     ask_user: dict | None = None
     changes: ChangeSet = field(default_factory=ChangeSet)
     tool_log: list[dict] = field(default_factory=list)
+    stats: TurnStats = field(default_factory=TurnStats)
+
+
+# Anthropic per-1M-token prices (USD). Update as pricing changes.
+# Cache-read: typically 0.10× input. Cache-create (5-min TTL): 1.25×
+# input. Stored explicitly so the math is auditable.
+_PRICING = {
+    # claude-opus-4-7
+    "claude-opus-4-7":            {"in": 15.0, "out": 75.0, "cache_read": 1.50,  "cache_create": 18.75},
+    "claude-opus-4-7[1m]":        {"in": 15.0, "out": 75.0, "cache_read": 1.50,  "cache_create": 18.75},
+    # claude-sonnet-4-6
+    "claude-sonnet-4-6":          {"in":  3.0, "out": 15.0, "cache_read": 0.30,  "cache_create":  3.75},
+    # claude-haiku-4-5
+    "claude-haiku-4-5":           {"in":  1.0, "out":  5.0, "cache_read": 0.10,  "cache_create":  1.25},
+    "claude-haiku-4-5-20251001":  {"in":  1.0, "out":  5.0, "cache_read": 0.10,  "cache_create":  1.25},
+}
+
+
+def _cost_usd(model: str, in_t: int, out_t: int, cache_r: int, cache_c: int) -> float:
+    """Compute USD cost from a row in `_PRICING`. Returns 0.0 for an
+    unknown model so the rest of the stats still flow to the UI."""
+    p = _PRICING.get(model)
+    if p is None:
+        return 0.0
+    M = 1_000_000
+    return (
+        in_t       * p["in"]           / M
+        + out_t    * p["out"]          / M
+        + cache_r  * p["cache_read"]   / M
+        + cache_c  * p["cache_create"] / M
+    )
+
+
+def _accumulate_usage(stats: TurnStats, resp_usage) -> None:
+    """Add an Anthropic response's usage block into the running
+    TurnStats. Tolerates missing fields (older API responses, fake
+    mode) by treating absent values as 0."""
+    if resp_usage is None:
+        return
+    stats.input_tokens        += int(getattr(resp_usage, "input_tokens", 0) or 0)
+    stats.output_tokens       += int(getattr(resp_usage, "output_tokens", 0) or 0)
+    stats.cache_read_tokens   += int(getattr(resp_usage, "cache_read_input_tokens", 0) or 0)
+    stats.cache_create_tokens += int(getattr(resp_usage, "cache_creation_input_tokens", 0) or 0)
 
 
 def _is_fake() -> bool:
@@ -49,10 +124,19 @@ def run_turn(
     if transcript is None:
         transcript = []
     transcript.append({"role": "user", "content": user_message})
+    started_at = time.monotonic()
     if _is_fake():
         turn = _fake_turn(user_message, session, transcript, pending_ask, on_progress)
     else:
         turn = _real_turn(user_message, session, transcript, on_progress)
+    turn.stats.elapsed_s = time.monotonic() - started_at
+    turn.stats.cost_usd = _cost_usd(
+        turn.stats.model,
+        turn.stats.input_tokens,
+        turn.stats.output_tokens,
+        turn.stats.cache_read_tokens,
+        turn.stats.cache_create_tokens,
+    )
     transcript.append({"role": "assistant", "content": turn.text or ""})
     return turn
 
@@ -357,8 +441,10 @@ def _real_turn(
             messages.append({"role": "assistant", "content": entry["content"]})
 
     turn = AgentTurn()
+    turn.stats.model = model
 
     for _ in range(max_tool_iterations):
+        turn.stats.iterations += 1
         # Re-render the system prompt each iteration so the agent sees
         # the *current* spec after any set_source it has already issued
         # this turn.
@@ -370,6 +456,7 @@ def _real_turn(
             tools=TOOL_DEFINITIONS,
             messages=messages,
         )
+        _accumulate_usage(turn.stats, getattr(resp, "usage", None))
         text_parts: list[str] = []
         tool_uses: list[dict] = []
         for block in resp.content:

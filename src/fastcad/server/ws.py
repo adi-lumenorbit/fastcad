@@ -231,7 +231,11 @@ async def _emit_turn(ws: WebSocket, ctx: WSContext, turn: AgentTurn) -> None:
     if cs.added or cs.updated or cs.removed:
         await _send(ws, ctx, _scene_delta(ctx, cs.added, cs.updated, cs.removed))
     if turn.text:
-        await _send(ws, ctx, {"type": "agent_message", "text": turn.text})
+        await _send(ws, ctx, {
+            "type": "agent_message",
+            "text": turn.text,
+            "stats": turn.stats.to_dict(),
+        })
     if turn.ask_user is not None:
         ctx.pending_ask = turn.ask_user
         await _send(
