@@ -102,6 +102,28 @@ def test_agent_status_shows_label(live_server: str, page) -> None:
     assert label.inner_text() == "Idle"
 
 
+def test_agent_message_includes_stats_footer(live_server: str, page) -> None:
+    """Each agent reply gets a `.msg-stats` footer with $ spent and
+    elapsed time. In fake mode tokens are zero so the renderer falls
+    back to "$0 · NN ms · 0↑ 0↓" — but the element is still rendered
+    so the user sees the row."""
+    page.goto(live_server + "/")
+    page.wait_for_function("window.fastcad && window.fastcad.ready === true")
+
+    page.fill("[data-testid=chat-input]", "Make a 20mm cube")
+    page.click("[data-testid=chat-send-btn]")
+
+    # Wait for the agent reply, then for the stats footer beneath it.
+    page.wait_for_selector(
+        ".msg.agent [data-testid=agent-stats]", timeout=8000
+    )
+    text = page.locator(".msg.agent [data-testid=agent-stats]").last.inner_text()
+    # Three "·"-joined fields: cost, elapsed, tokens. Look for any
+    # plausible elapsed unit ("ms" or "s") to pin behaviour.
+    assert " · " in text
+    assert "ms" in text or " s" in text
+
+
 def test_chat_input_history_arrow_keys(live_server: str, page) -> None:
     """ArrowUp scrolls back through previous prompts, ArrowDown scrolls
     forward, ArrowDown past the newest restores the in-progress draft."""
