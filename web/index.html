@@ -49,7 +49,10 @@
       </div>
       <form id="chat-form">
         <span id="agent-status" data-testid="agent-status"
-              data-state="idle" title="Agent state: idle">●</span>
+              data-state="idle" title="Idle">
+          <span class="glyph" data-testid="agent-status-glyph">●</span>
+          <span class="label" data-testid="agent-status-label">Idle</span>
+        </span>
         <input id="chat-input" data-testid="chat-input" type="text"
                autocomplete="off" placeholder="Try: make a 20mm cube" />
         <button id="chat-send-btn" data-testid="chat-send-btn" type="submit">Send</button>
