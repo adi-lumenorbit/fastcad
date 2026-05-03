@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "fastcad"
 version = "0.0.1"
 description = "AI-driven incremental 3D modeling, OpenSCAD-compatible export."
+authors = [{ name = "Adi Oltean" }]
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"

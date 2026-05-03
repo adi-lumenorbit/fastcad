@@ -101,4 +101,4 @@ provisioning sequence.
 
 ## License
 
-[MIT](LICENSE) — © 2026 adi.
+[MIT](LICENSE) — © 2026 Adi Oltean.
