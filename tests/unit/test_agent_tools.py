@@ -159,6 +159,77 @@ def test_dispatch_inspect_section_oblique_requires_normal():
     assert "normal" in payload["error"].lower()
 
 
+def test_run_turn_records_elapsed_in_stats():
+    """Even fake-mode runs populate `stats.elapsed_s` so the UI gets
+    a footer."""
+    from fastcad.agent.client import run_turn
+    s = _fresh()
+    turn = run_turn("Make a 20mm cube", s)
+    assert turn.stats.elapsed_s >= 0
+    # Fake mode doesn't touch the API → no tokens, no cost.
+    assert turn.stats.input_tokens == 0
+    assert turn.stats.output_tokens == 0
+    assert turn.stats.cost_usd == 0.0
+
+
+def test_cost_usd_known_model():
+    """Pricing math: 1M input + 1M output on opus = 15 + 75 = $90."""
+    from fastcad.agent.client import _cost_usd
+    cost = _cost_usd("claude-opus-4-7", 1_000_000, 1_000_000, 0, 0)
+    assert cost == pytest.approx(90.0, rel=1e-9)
+
+
+def test_cost_usd_includes_cache():
+    """Cache reads at 0.10× input rate: 1M cache_read on opus = $1.50."""
+    from fastcad.agent.client import _cost_usd
+    cost = _cost_usd("claude-opus-4-7", 0, 0, 1_000_000, 0)
+    assert cost == pytest.approx(1.50, rel=1e-9)
+
+
+def test_cost_usd_unknown_model_returns_zero():
+    from fastcad.agent.client import _cost_usd
+    assert _cost_usd("nonexistent-model", 1000, 2000, 0, 0) == 0.0
+
+
+def test_detect_persistent_defects_inline_matches_critics():
+    """The smart-exit copy of `detect_persistent_defects` must agree
+    with the canonical version in `agent.critics`. Same input, same
+    output."""
+    from fastcad.agent.client import _detect_persistent_defects_inline
+    from fastcad.agent.critics import detect_persistent_defects
+    history = [
+        [{"where": "axial_section.thread_profile"}, {"where": "connected_components"}],
+        [{"where": "axial_section.thread_profile"}, {"where": "bbox_z_extent"}],
+        [{"where": "axial_section.thread_profile"}, {"where": "axial_consistency"}],
+        [{"where": "axial_section.thread_profile"}, {"where": "connected_components"}],
+    ]
+    a = _detect_persistent_defects_inline(history, 4)
+    b = detect_persistent_defects(history, 4)
+    assert a == b == ["axial_section.thread_profile"]
+
+
+def test_detect_persistent_defects_inline_no_persistence():
+    from fastcad.agent.client import _detect_persistent_defects_inline
+    history = [
+        [{"where": "a"}],
+        [{"where": "b"}],
+        [{"where": "c"}],
+        [{"where": "d"}],
+    ]
+    assert _detect_persistent_defects_inline(history, 4) == []
+
+
+def test_detect_persistent_defects_inline_empty_iter_breaks_streak():
+    from fastcad.agent.client import _detect_persistent_defects_inline
+    history = [
+        [{"where": "x"}],
+        [],   # streak break
+        [{"where": "x"}],
+        [{"where": "x"}],
+    ]
+    assert _detect_persistent_defects_inline(history, 4) == []
+
+
 def test_dispatch_inspect_section_skip_polygons():
     s = _fresh()
     s.set_source("cube([5, 5, 5]);")

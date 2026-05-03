@@ -34,6 +34,9 @@
         <span><b>H</b> home</span>
       </div>
     </div>
+    <div id="app-divider" data-testid="app-divider" role="separator"
+         aria-orientation="vertical" tabindex="0"
+         title="Drag to resize viewer / chat split"></div>
     <div id="chat-pane">
       <div id="chat-log" data-testid="chat-log" role="log" aria-live="polite"></div>
       <div id="ask-user-area" data-testid="ask-user-area" hidden></div>
@@ -49,7 +52,10 @@
       </div>
       <form id="chat-form">
         <span id="agent-status" data-testid="agent-status"
-              data-state="idle" title="Agent state: idle">●</span>
+              data-state="idle" title="Idle">
+          <span class="glyph" data-testid="agent-status-glyph">●</span>
+          <span class="label" data-testid="agent-status-label">Idle</span>
+        </span>
         <input id="chat-input" data-testid="chat-input" type="text"
                autocomplete="off" placeholder="Try: make a 20mm cube" />
         <button id="chat-send-btn" data-testid="chat-send-btn" type="submit">Send</button>

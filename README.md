@@ -4,6 +4,8 @@ AI-driven incremental 3D modeler — OpenSCAD-compatible export, three.js
 viewer, Anthropic Claude as the modeling agent. Local web app, runs on
 Ubuntu/WSL with the browser on Windows.
 
+![fastcad UI overview — viewer on the left, chat + progress panel on the right](docs/screenshots/ui-overview.png)
+
 ## Quick start (WSL)
 
 ```
@@ -21,19 +23,37 @@ on first run, allow port 8765.
 
 ## What it does
 
-- Type a prompt: *"Make a 20mm cube"*, *"Add a 10mm sphere on top
-  centered"*, *"Subtract a 5mm cylinder through it"*.
-- The agent picks references from the current scene and emits CSG ops.
-- Each step re-meshes only the affected branch — the rest of the scene
-  stays put. (Real OpenSCAD recompiles everything.)
-- Undo / Redo per step.
-- Export `.scad` at any time and open it in real OpenSCAD.
+- Type a prompt: *"Make a 20mm cube"*, *"Design an M6 hex bolt 25 mm
+  long"*, *"Create a Raspberry Pi 4B enclosure"*.
+- The agent rewrites a single `.scad` spec each turn (the spec is the
+  model, the export, and the source-of-truth — no separate IR). A
+  dependency-aware cache re-meshes only the modules whose dependencies
+  actually changed.
+- Three feedback channels close the agent's 3D blind spot: a structural
+  validator (Channel 1), parallel vision critics (Channel 2), and 2D
+  cross-section inspection (sections + `inspect_section` tool).
+- Cached research entries in `docs/research/` give the agent canonical
+  spec data for standardized parts.
+- Per-turn cost + elapsed footer on each agent reply.
+- Undo / Redo / Reset, export `.scad` at any time, open in real
+  OpenSCAD.
+
+| Iso render (browser) | Axial section (validator's eye) |
+|----------------------|----------------------------------|
+| <img src="docs/screenshots/m6-bolt-viewer.png" alt="M6 hex-head bolt rendered in the three.js viewer" width="320"> | <img src="docs/screenshots/m6-bolt-section-xz.png" alt="XZ axial cross-section showing real sawtooth thread profile" width="200"> |
+
+The XZ section on the right is what the section critic feeds back to
+the agent — paper-thin spike teeth show up unambiguously in 2D where
+they hide in a 3D iso render. That's how this thread profile got
+recovered after multiple iterations of the same agent producing
+"helical band of zero thickness" geometry.
 
 ## Tests
 
 ```
-.venv/bin/pytest tests/unit -q             # 42 unit tests (kernel, scene, ops,
-                                           # session, scad, agent, ws, feedback)
+.venv/bin/pytest tests/unit -q             # ~280 unit tests (kernel, scene,
+                                           # session, scad, agent, ws, feedback,
+                                           # validate, sections, security, …)
 bash scripts/e2e.sh                         # Playwright headless Chromium
 ```
 
@@ -66,5 +86,15 @@ all e2e tests; useful for offline development.
 
 ## Architecture
 
-See `docs/plans/01-bootstrap.md` for the bootstrap plan and `CLAUDE.md`
-for project-wide conventions.
+See `docs/architecture.md` for the full system view (spec model, agent
+loop, three feedback channels, wire protocol, security posture,
+deployment) and `CLAUDE.md` for project-wide conventions. Per-feature
+plans live in `docs/plans/`.
+
+## Production deploy
+
+`deploy/` ships everything for a hardened single-VM deployment:
+`Caddyfile` (auto-LE TLS + basic_auth + rate-limit), sandboxed
+systemd unit, fail2ban jail, and an idempotent `bootstrap.sh` for
+a fresh Ubuntu 24.04 host. See `deploy/README.md` for the gcloud
+provisioning sequence.

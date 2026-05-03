@@ -14,14 +14,40 @@ html, body {
 }
 
 #app {
-  display: grid;
-  grid-template-columns: 1fr 380px;
+  display: flex;
+  flex-direction: row;
   height: 100vh;
+  /* Right pane width (the chat / progress side). The vertical
+     divider drag updates this CSS variable; layout is otherwise
+     fully fluid. */
+  --right-pane-width: 380px;
 }
 
 #viewer-pane {
   position: relative;
   background: #2a2a2a;
+  flex: 1 1 auto;
+  /* Min-width keeps the viewer usable even when the user has
+     dragged the chat pane very wide. */
+  min-width: 200px;
+  overflow: hidden;
+}
+
+/* Drag handle between viewer and chat-pane. JS in main.js wires
+   pointer events to incrementally resize the right-pane width. */
+#app-divider {
+  flex: 0 0 6px;
+  background: #2a2a2a;
+  border-left: 1px solid #1a1a1a;
+  border-right: 1px solid #1a1a1a;
+  cursor: col-resize;
+  user-select: none;
+  transition: background 0.1s;
+}
+
+#app-divider:hover,
+#app-divider.dragging {
+  background: #4a4a4a;
 }
 
 #viewer {
@@ -75,11 +101,18 @@ html, body {
 #chat-pane {
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #333;
   background: #202020;
+  /* Width is controlled by the vertical divider (JS sets the
+     `--right-pane-width` CSS variable on `#app`). flex-shrink: 0
+     means the right pane doesn't get squeezed when the viewer
+     wants more space — only the divider drag changes its size. */
+  width: var(--right-pane-width, 380px);
+  flex-shrink: 0;
   /* Constrain to viewport so children's flex sizing & overflow work. */
   min-height: 0;
   overflow: hidden;
+  min-width: 280px;
+  max-width: 80vw;
 }
 
 #chat-log {
@@ -108,6 +141,62 @@ html, body {
 
 #chat-log .msg.agent {
   background: #2c2c2c;
+}
+
+/* Errors stand out — bordered, red text, slightly darker bg. The
+   <details> disclosure inside expands to show the underlying payload
+   and recent WS log so the user has something concrete to act on. */
+#chat-log .msg.agent.error {
+  background: #2a1414;
+  border-left: 3px solid #d77;
+  color: #f8b8b8;
+}
+
+/* Warnings (persistence detected, etc.) sit between info and error:
+   amber border + tinted bg. */
+#chat-log .msg.agent.warning {
+  background: #2a2210;
+  border-left: 3px solid #d4a05a;
+  color: #f0d8a8;
+}
+
+#chat-log .msg .msg-details {
+  margin-top: 6px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: #888;
+}
+
+#chat-log .msg .msg-details summary {
+  cursor: pointer;
+  color: #aaa;
+  user-select: none;
+}
+
+#chat-log .msg .msg-details pre {
+  margin: 6px 0 0 0;
+  padding: 6px 8px;
+  background: #141414;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow-y: auto;
+  color: #b8b8b8;
+}
+
+/* Stats footer under each agent reply: $ spent · time · tokens.
+   Muted so it doesn't compete with the reply text; hover the line
+   for the full token breakdown via title. */
+#chat-log .msg .msg-stats {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px dotted #3a3a3a;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  color: #888;
+  user-select: text;
+  letter-spacing: 0.02em;
 }
 
 #chat-log .msg.tool {
@@ -257,25 +346,54 @@ html, body {
 #agent-status {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 28px;
+  gap: 6px;
+  padding: 0 10px;
   height: auto;
-  padding: 0 6px;
-  font-size: 14px;
+  font-size: 12px;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   background: #1a1a1a;
-  color: #555;
+  color: #888;
   user-select: none;
-  transition: color 0.1s;
+  transition: color 0.15s, background 0.15s;
+  min-width: 110px;
 }
 
+#agent-status .glyph {
+  font-size: 14px;
+  width: 16px;
+  text-align: center;
+}
+
+#agent-status .label {
+  white-space: nowrap;
+}
+
+/* Idle (default): muted gray. */
+#agent-status[data-state="idle"] {
+  color: #888;
+}
+
+/* Thinking: yellow with the spinner glyph. */
 #agent-status[data-state="thinking"] {
   color: #d4d4aa;
 }
 
+/* Waiting on user input (after ask_user): blue, calm. The agent is
+   not stuck and not working — it's holding for your reply. */
+#agent-status[data-state="waiting"] {
+  color: #6aa9e9;
+}
+
+/* Stuck: red, pulses. Only after a long progress silence. */
 #agent-status[data-state="stuck"] {
   color: #d77;
   animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* WebSocket dropped — orange, no animation. Refresh resets it. */
+#agent-status[data-state="disconnected"] {
+  color: #d8965a;
+  background: #2a1a14;
 }
 
 @keyframes pulse {

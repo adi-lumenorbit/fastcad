@@ -174,13 +174,97 @@ const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const askArea = document.getElementById("ask-user-area");
 
-function addMessage(role, text) {
+function addMessage(role, text, details, stats) {
   const div = document.createElement("div");
   div.className = `msg ${role}`;
-  div.textContent = text;
+  // Mark error-shaped agent messages so CSS can style them red.
+  // The convention is leading "[error]" — already used by the
+  // server's `error` WS message and by the WS close handler.
+  // [warning] gets the amber treatment for persistence + similar
+  // soft alerts that aren't fatal but the user should notice.
+  if (role === "agent" && typeof text === "string") {
+    if (text.startsWith("[error]")) div.classList.add("error");
+    else if (text.startsWith("[warning]")) div.classList.add("warning");
+  }
   div.dataset.role = role;
+  // Body text via textContent (XSS-safe). Optional `details` arg is
+  // a string; when present, render as a collapsible <details> block
+  // so the user can expand to see the underlying payload, WS close
+  // code, progress timeline, etc.
+  const body = document.createElement("span");
+  body.textContent = text;
+  div.appendChild(body);
+  if (typeof details === "string" && details.length > 0) {
+    const det = document.createElement("details");
+    det.className = "msg-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "Show details";
+    det.appendChild(summary);
+    const pre = document.createElement("pre");
+    pre.textContent = details;
+    det.appendChild(pre);
+    div.appendChild(det);
+  }
+  if (stats && typeof stats === "object") {
+    const footer = renderStatsFooter(stats);
+    if (footer) div.appendChild(footer);
+  }
   chatLog.appendChild(div);
   chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+
+function renderStatsFooter(stats) {
+  // Compact one-line summary appended after the agent's reply.
+  // Shows: $ spent, elapsed time, model + token totals (input/output
+  // and any cached). Hover for the full per-field breakdown.
+  const cost = typeof stats.cost_usd === "number" ? stats.cost_usd : 0;
+  const elapsed = typeof stats.elapsed_s === "number" ? stats.elapsed_s : 0;
+  const inT = stats.input_tokens || 0;
+  const outT = stats.output_tokens || 0;
+  const cR = stats.cache_read_tokens || 0;
+  const cC = stats.cache_create_tokens || 0;
+  const iters = stats.iterations || 0;
+  const model = stats.model || "";
+  // Skip the footer entirely if there's no signal to report (e.g.
+  // fake mode with zero tokens AND zero elapsed).
+  if (cost === 0 && elapsed === 0 && inT === 0 && outT === 0) return null;
+  const tokenSummary = cR > 0
+    ? `${inT}↑ ${outT}↓ ${cR} cached`
+    : `${inT}↑ ${outT}↓`;
+  const el = document.createElement("div");
+  el.className = "msg-stats";
+  el.dataset.testid = "agent-stats";
+  el.textContent = `${formatCost(cost)} · ${formatElapsed(elapsed)} · ${tokenSummary}`;
+  el.title = (
+    `model: ${model}\n` +
+    `cost: $${cost.toFixed(6)}\n` +
+    `elapsed: ${elapsed.toFixed(2)} s\n` +
+    `input tokens:    ${inT}\n` +
+    `output tokens:   ${outT}\n` +
+    `cache read:      ${cR}\n` +
+    `cache create:    ${cC}\n` +
+    `iterations:      ${iters}`
+  );
+  return el;
+}
+
+
+function formatCost(cost) {
+  // Sub-cent → mils; cent → cents; over a dollar → dollars-and-cents.
+  if (cost <= 0) return "$0";
+  if (cost < 0.01) return `${(cost * 1000).toFixed(2)}m¢`;  // 1.23m¢
+  if (cost < 1)    return `${(cost * 100).toFixed(2)}¢`;     // 23.45¢
+  return `$${cost.toFixed(2)}`;
+}
+
+
+function formatElapsed(s) {
+  if (s < 1)  return `${Math.round(s * 1000)} ms`;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  const mins = Math.floor(s / 60);
+  const secs = Math.round(s - mins * 60);
+  return `${mins}m ${secs}s`;
 }
 
 function clearAsk() {
@@ -240,8 +324,25 @@ function connect() {
     window.fastcad.ready = true;
     document.body.dataset.wsState = "open";
   });
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (ev) => {
     document.body.dataset.wsState = "closed";
+    // Tell the user the connection died so the indicator stops
+    // pretending to "think". They have to refresh to recover.
+    setAgentStatus("disconnected");
+    // Surface the *cause* in chat too — otherwise the only sign of
+    // the disconnect is the indicator and the user has no idea why
+    // their last prompt produced nothing. The disclosure attaches
+    // recent WS messages so the user can see exactly how far the
+    // turn got before the drop.
+    const reason = ev && ev.reason ? `: ${ev.reason}` : "";
+    const code   = ev && ev.code ? ` [code ${ev.code}]` : "";
+    addMessage(
+      "agent",
+      `[error] Connection to server lost${code}${reason}. ` +
+      `Refresh the page to reconnect. If this happens repeatedly, ` +
+      `check the server log (journalctl -u fastcad).`,
+      buildDisconnectDetails(ev),
+    );
   });
   ws.addEventListener("message", (ev) => {
     let payload;
@@ -256,30 +357,45 @@ function handleServerMessage(payload) {
     case "scene_init": applySceneInit(payload); break;
     case "scene_delta": applySceneDelta(payload); break;
     case "agent_message":
-      addMessage("agent", payload.text);
+      addMessage("agent", payload.text, undefined, payload.stats);
       // Final assistant message = end of turn.
       setAgentStatus("idle");
       break;
     case "ask_user":
       showAsk(payload.question, payload.options);
-      // Waiting on the user, not the agent.
-      setAgentStatus("idle");
+      // Agent paused on you — distinct from idle so the user can
+      // tell at a glance "it's my move now" vs "nothing to do".
+      setAgentStatus("waiting");
       break;
     case "tool_log":
-      for (const c of payload.calls) addMessage("tool", `${c.name}(${formatToolArgs(c.args)})`);
+      // Tool calls are surfaced live in the progress panel (with
+      // results, success/failure colors, and timing). The chat
+      // panel used to mirror them as args-only rows, but that
+      // was redundant + non-actionable (`set_source({"text":"<7058
+      // chars>"})` tells you nothing). We keep the WS payload for
+      // feedback bundles + ws_log inspection but render nothing
+      // in chat.
       break;
-    case "progress":
+    case "progress": {
       handleProgress(payload);
       // Any progress event = agent is doing something. Reset stuck
-      // timer; keep state as thinking.
-      if (agentStatus && agentStatus.dataset.state !== "idle") {
+      // timer; keep state as thinking. Only flip out of `waiting`
+      // when fresh progress arrives — that means the agent has
+      // resumed after the user's reply.
+      const cur = agentStatus && agentStatus.dataset.state;
+      if (cur !== "idle") {
         setAgentStatus("thinking");
         bumpStuckTimer();
       }
       break;
+    }
     case "scad": exportScad(payload.source); break;
     case "error":
-      addMessage("agent", `[error] ${payload.message}`);
+      addMessage(
+        "agent",
+        `[error] ${payload.message}`,
+        buildErrorDetails(payload),
+      );
       setAgentStatus("idle");
       break;
   }
@@ -343,6 +459,30 @@ function handleProgress(payload) {
   }
   if (t === "validation_pass") {
     appendProgressEntry("done", `✓ validation passed (${ev.slug})`);
+    return;
+  }
+
+  // Persistence detected — same defect class repeated N iterations.
+  // Surface prominently in both the progress panel and the chat so
+  // the user knows the agent is stuck instead of silently waiting
+  // for the iteration cap to hit.
+  if (t === "critics_escalation") {
+    const keys = (ev.persistent_keys || []).join(", ");
+    const fixit = ev.fixit_will_fire ? " — fix-it critic firing this iteration" : "";
+    const text = `⚠ persistent defects: ${keys || "(unspecified)"}${fixit}`;
+    appendProgressEntry("warning", text);
+    // Only post the chat banner once per turn. Track via a flag on
+    // window.fastcad so a fresh prompt resets it.
+    if (!window.fastcad._persistenceBannerShown) {
+      window.fastcad._persistenceBannerShown = true;
+      addMessage(
+        "agent",
+        `[warning] The agent has hit the same defect class ` +
+        `(${keys || "unspecified"}) on multiple iterations. ` +
+        `It may not converge on its own; you can wait, ` +
+        `or interrupt and rephrase the prompt.`,
+      );
+    }
     return;
   }
 
@@ -441,27 +581,52 @@ if (progressClearBtn) {
 }
 
 // ---------------------------------------------------------------------------
-// Agent status indicator — visual cue for thinking / idle / stuck.
-// Cycles a braille spinner glyph while the agent's working; goes red-pulse
-// when no progress event arrives for 30s.
+// Agent status indicator — visual cue for what the agent is doing.
+// Five states with distinct glyphs, colors, and labels:
+//
+//   idle         ●  gray      "Idle"                 — nothing pending.
+//   thinking     ⠋  yellow    "Thinking…"            — turn in flight.
+//   waiting      ◉  blue      "Waiting for you"      — agent paused
+//                                                        on ask_user.
+//   stuck        ⚠  red pulse "Stuck (no progress)"  — long silence.
+//   disconnected ○  orange    "Disconnected — refresh" — WS dropped.
+//
+// The label text is what the user reads. The glyph is decoration.
 // ---------------------------------------------------------------------------
 
 const agentStatus = document.getElementById("agent-status");
+const agentStatusGlyph = agentStatus && agentStatus.querySelector(".glyph");
+const agentStatusLabel = agentStatus && agentStatus.querySelector(".label");
 const SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
 let spinnerIdx = 0;
 let spinnerInterval = null;
 let stuckTimer = null;
-const STUCK_AFTER_MS = 30000;
+// 90s — long enough that a research-subagent + critic round-trip
+// completes naturally without tripping the stuck warning.
+const STUCK_AFTER_MS = 90000;
+
+const STATUS_DESCRIPTIONS = {
+  "idle":         { glyph: "●", label: "Idle" },
+  "thinking":     { glyph: "⠋", label: "Thinking…" },
+  "waiting":      { glyph: "◉", label: "Waiting for you" },
+  "stuck":        { glyph: "⚠", label: "Stuck — no progress for 90s" },
+  "disconnected": { glyph: "○", label: "Disconnected — refresh" },
+};
+const _agentStatusHistory = [];
 
 function setAgentStatus(state) {
   if (!agentStatus) return;
+  const desc = STATUS_DESCRIPTIONS[state] || STATUS_DESCRIPTIONS.idle;
   agentStatus.dataset.state = state;
-  agentStatus.title = `Agent state: ${state}`;
+  agentStatus.title = desc.label;
+  if (agentStatusLabel) agentStatusLabel.textContent = desc.label;
+  _agentStatusHistory.push(state);
+  if (_agentStatusHistory.length > 100) _agentStatusHistory.splice(0, 50);
   if (state === "thinking") {
     if (!spinnerInterval) {
       spinnerInterval = setInterval(() => {
         spinnerIdx = (spinnerIdx + 1) % SPINNER_FRAMES.length;
-        agentStatus.textContent = SPINNER_FRAMES[spinnerIdx];
+        if (agentStatusGlyph) agentStatusGlyph.textContent = SPINNER_FRAMES[spinnerIdx];
       }, 100);
     }
   } else {
@@ -469,7 +634,7 @@ function setAgentStatus(state) {
       clearInterval(spinnerInterval);
       spinnerInterval = null;
     }
-    agentStatus.textContent = state === "stuck" ? "⚠" : "●";
+    if (agentStatusGlyph) agentStatusGlyph.textContent = desc.glyph;
   }
 }
 
@@ -484,76 +649,294 @@ function bumpStuckTimer() {
 
 setAgentStatus("idle");
 
-// Test hook
+// Test hook. `agentStatusHistory` records every transition (capped
+// at 100) so e2e can assert sequences even when intermediate states
+// are too short-lived for polling to catch.
 if (window.fastcad) {
   window.fastcad.agentStatus = () => agentStatus ? agentStatus.dataset.state : null;
+  window.fastcad.agentStatusHistory = () => _agentStatusHistory.slice();
+}
+
+
+// ---------------------------------------------------------------------------
+// Error-detail formatters — populate the `<details>` disclosure on
+// `[error]` chat messages so the user can see what actually happened.
+// ---------------------------------------------------------------------------
+
+function buildErrorDetails(payload) {
+  // Server-side `error` message. Include the full payload + the most
+  // recent few WS log entries so the user has the request → response
+  // sequence handy.
+  const lines = [
+    `time: ${new Date().toISOString()}`,
+    `payload: ${JSON.stringify(payload, null, 2)}`,
+    "",
+    "recent ws messages:",
+    ...recentWsLogLines(10),
+  ];
+  return lines.join("\n");
+}
+
+function buildDisconnectDetails(ev) {
+  const lines = [
+    `time: ${new Date().toISOString()}`,
+    `close code: ${ev && ev.code}`,
+    `close reason: ${(ev && ev.reason) || "(none provided)"}`,
+    `was clean: ${ev && ev.wasClean}`,
+    "",
+    "recent ws messages (oldest first):",
+    ...recentWsLogLines(20),
+  ];
+  return lines.join("\n");
+}
+
+function recentWsLogLines(n) {
+  const tail = wsLog.slice(-n);
+  return tail.map((entry) => {
+    const ts = new Date(entry.t).toISOString().slice(11, 23);
+    const summary = entry.summary
+      ? JSON.stringify(entry.summary).slice(0, 200)
+      : "";
+    return `  ${ts} ${entry.dir.padEnd(3)} ${entry.type}${summary ? "  " + summary : ""}`;
+  });
+}
+
+
+// ---------------------------------------------------------------------------
+// Chat input history — up/down arrows scroll through previous prompts,
+// like a shell's readline. Persisted in localStorage so it survives
+// reloads. Capped to the last 50 entries.
+// ---------------------------------------------------------------------------
+
+const INPUT_HISTORY_KEY = "fastcad.chatHistory";
+const INPUT_HISTORY_MAX = 50;
+
+let inputHistory = [];
+try {
+  const saved = localStorage.getItem(INPUT_HISTORY_KEY);
+  if (saved) inputHistory = JSON.parse(saved) || [];
+} catch (_) { /* ignore */ }
+
+// `historyCursor` is null when the user is editing fresh text. When
+// they hit ArrowUp it becomes an index into `inputHistory` (counting
+// from the end). `historyDraft` snapshots whatever they had typed
+// before they started navigating, so ArrowDown back to the bottom
+// restores it.
+let historyCursor = null;
+let historyDraft = "";
+
+function pushHistory(text) {
+  if (!text) return;
+  // Don't insert duplicate of the most-recent entry — typing the
+  // same prompt twice in a row shouldn't bloat history.
+  if (inputHistory[inputHistory.length - 1] === text) return;
+  inputHistory.push(text);
+  if (inputHistory.length > INPUT_HISTORY_MAX) {
+    inputHistory.splice(0, inputHistory.length - INPUT_HISTORY_MAX);
+  }
+  try {
+    localStorage.setItem(INPUT_HISTORY_KEY, JSON.stringify(inputHistory));
+  } catch (_) { /* ignore quota / private mode */ }
+  historyCursor = null;
+  historyDraft = "";
+}
+
+function navigateHistory(direction) {
+  if (inputHistory.length === 0) return;
+  if (historyCursor === null) {
+    if (direction !== -1) return;   // ArrowDown at fresh-text does nothing.
+    historyDraft = chatInput.value;
+    historyCursor = inputHistory.length - 1;
+  } else {
+    historyCursor += direction;     // -1 = older, +1 = newer
+    if (historyCursor < 0) historyCursor = 0;
+    if (historyCursor >= inputHistory.length) {
+      // Past the newest → restore the fresh draft.
+      historyCursor = null;
+      chatInput.value = historyDraft;
+      // Cursor at end after restore.
+      requestAnimationFrame(() => {
+        chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+      });
+      return;
+    }
+  }
+  chatInput.value = inputHistory[historyCursor];
+  // Move cursor to end so subsequent typing appends, mimicking shell.
+  requestAnimationFrame(() => {
+    chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+  });
+}
+
+if (chatInput) {
+  chatInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowUp") {
+      navigateHistory(-1);
+      ev.preventDefault();
+    } else if (ev.key === "ArrowDown") {
+      navigateHistory(+1);
+      ev.preventDefault();
+    } else if (ev.key !== "Enter") {
+      // Any other keystroke = user is editing again. Cancel the
+      // history-navigation cursor so a future ArrowUp starts fresh.
+      historyCursor = null;
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Resizable chat-log / progress-pane split. Drag the #pane-divider to
-// rebalance; CSS reads --pane-split (a percentage) on #chat-pane.
+// Resizable splits — both the vertical viewer/chat divider and the
+// horizontal chat-log/progress-pane divider share the same drag
+// machinery. The handler is movementX/movementY based: each pointer
+// move adds the per-event delta to the current size, with a clamp.
+// This avoids the dead-zone bug of the previous "anchored" approach
+// (where dragging past the clamp and reversing left a gap before the
+// divider tracked the cursor again — visible as the cursor "jumping"
+// because the divider stayed put while the cursor came back).
 // ---------------------------------------------------------------------------
 
-const paneDivider = document.getElementById("pane-divider");
-const chatPane = document.getElementById("chat-pane");
-
-if (paneDivider && chatPane) {
+function makeResizable({ divider, axis, getSize, setSize, storageKey }) {
+  if (!divider) return;
   let dragging = false;
-  let dragStartY = 0;
-  let dragStartPct = 60;
-
-  function setSplit(pct) {
-    // Clamp so neither pane disappears entirely.
-    const clamped = Math.max(15, Math.min(85, pct));
-    chatPane.style.setProperty("--pane-split", String(clamped));
-    try {
-      localStorage.setItem("fastcad.paneSplit", String(clamped));
-    } catch (_) { /* private mode etc. — ignore */ }
-  }
 
   // Restore last drag position across reloads.
   try {
-    const saved = localStorage.getItem("fastcad.paneSplit");
-    if (saved !== null) setSplit(parseFloat(saved));
+    const saved = localStorage.getItem(storageKey);
+    if (saved !== null) setSize(parseFloat(saved));
   } catch (_) { /* ignore */ }
+
+  function applyAndSave(value) {
+    const stored = setSize(value);
+    if (stored == null) return;
+    try { localStorage.setItem(storageKey, String(stored)); }
+    catch (_) { /* ignore */ }
+  }
 
   function startDrag(ev) {
     dragging = true;
-    // Anchor the drag at the cursor's current position so the divider
-    // tracks the cursor instead of jumping to wherever (clientY-rect.top)
-    // happens to map. Store initial cursor-Y and the current split %;
-    // subsequent moves apply (cursorY - startY) as a delta in %.
-    dragStartY = ev.clientY;
-    dragStartPct = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split")) || 60;
-    paneDivider.classList.add("dragging");
+    divider.classList.add("dragging");
     ev.preventDefault();
-    paneDivider.setPointerCapture(ev.pointerId);
+    divider.setPointerCapture(ev.pointerId);
   }
 
   function moveDrag(ev) {
     if (!dragging) return;
-    const rect = chatPane.getBoundingClientRect();
-    const deltaPct = ((ev.clientY - dragStartY) / rect.height) * 100;
-    setSplit(dragStartPct + deltaPct);
+    // movementX/Y is the delta since the previous pointermove. Adding
+    // it to the *current* size means clamps don't create dead zones —
+    // when the user reverses past a clamp, the divider follows the
+    // cursor immediately because it's reading current size, not a
+    // value frozen at drag-start.
+    const delta = axis === "x" ? ev.movementX : ev.movementY;
+    if (!delta) return;
+    applyAndSave(getSize() + delta);
   }
 
   function endDrag(ev) {
     if (!dragging) return;
     dragging = false;
-    paneDivider.classList.remove("dragging");
-    try { paneDivider.releasePointerCapture(ev.pointerId); } catch (_) { /* ignore */ }
+    divider.classList.remove("dragging");
+    try { divider.releasePointerCapture(ev.pointerId); } catch (_) { /* ignore */ }
   }
 
-  paneDivider.addEventListener("pointerdown", startDrag);
-  paneDivider.addEventListener("pointermove", moveDrag);
-  paneDivider.addEventListener("pointerup", endDrag);
-  paneDivider.addEventListener("pointercancel", endDrag);
+  divider.addEventListener("pointerdown", startDrag);
+  divider.addEventListener("pointermove", moveDrag);
+  divider.addEventListener("pointerup", endDrag);
+  divider.addEventListener("pointercancel", endDrag);
 
-  // Keyboard accessibility: arrow up/down nudges the split by 5%.
-  paneDivider.addEventListener("keydown", (ev) => {
-    const cur = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split")) || 60;
-    if (ev.key === "ArrowUp") { setSplit(cur - 5); ev.preventDefault(); }
-    else if (ev.key === "ArrowDown") { setSplit(cur + 5); ev.preventDefault(); }
+  // Keyboard accessibility: arrow keys nudge by 24 px.
+  divider.addEventListener("keydown", (ev) => {
+    const step = ev.shiftKey ? 60 : 24;
+    if (axis === "y" && ev.key === "ArrowUp")    { applyAndSave(getSize() - step); ev.preventDefault(); }
+    if (axis === "y" && ev.key === "ArrowDown")  { applyAndSave(getSize() + step); ev.preventDefault(); }
+    if (axis === "x" && ev.key === "ArrowLeft")  { applyAndSave(getSize() - step); ev.preventDefault(); }
+    if (axis === "x" && ev.key === "ArrowRight") { applyAndSave(getSize() + step); ev.preventDefault(); }
+  });
+}
+
+
+// Horizontal divider (chat-log / progress-pane). Size is stored as a
+// percentage on `--pane-split` (CSS reads `calc(var(--pane-split) * 1%)`
+// for chat-log's flex-basis). We map pointermove movementY → percent
+// of chatPane height each frame.
+const paneDivider = document.getElementById("pane-divider");
+const chatPane = document.getElementById("chat-pane");
+
+if (paneDivider && chatPane) {
+  const MIN_PCT = 15;
+  const MAX_PCT = 85;
+
+  const getPaneSplitPct = () => {
+    const v = parseFloat(getComputedStyle(chatPane).getPropertyValue("--pane-split"));
+    return Number.isFinite(v) ? v : 60;
+  };
+
+  // Convert a Y-pixel delta to a percent delta against the current
+  // chatPane height. Because we add *deltas* (not absolutes), there
+  // is no dead-zone when the clamp is hit.
+  let lastPct = getPaneSplitPct();
+
+  makeResizable({
+    divider: paneDivider,
+    axis: "y",
+    getSize: () => {
+      // For movementY-based math, we want size in *pixels* so the
+      // delta math doesn't have to convert each event. Use chatPane
+      // height × current%.
+      const h = chatPane.getBoundingClientRect().height || 1;
+      return getPaneSplitPct() * h / 100;
+    },
+    setSize: (px) => {
+      const h = chatPane.getBoundingClientRect().height || 1;
+      const pct = Math.max(MIN_PCT, Math.min(MAX_PCT, (px / h) * 100));
+      chatPane.style.setProperty("--pane-split", String(pct));
+      lastPct = pct;
+      return pct;
+    },
+    storageKey: "fastcad.paneSplit",
+  });
+}
+
+
+// Vertical divider (viewer / chat-pane). The convention used by
+// `makeResizable` is that `getSize()` returns the size of the pane
+// *before* the divider in the flex order — for the vertical divider
+// that's the viewer's width. `delta = movementX` is the number of
+// pixels the cursor moved right, which is also the number of pixels
+// the viewer should grow. We invert at storage time to keep the CSS
+// variable as right-pane width (which is what flex-shrink: 0 keys off).
+const appDivider = document.getElementById("app-divider");
+const appEl = document.getElementById("app");
+
+if (appDivider && appEl) {
+  const MIN_RIGHT_PX = 280;
+  // Cap so the viewer can never disappear entirely.
+  const maxRightPx = () => Math.max(MIN_RIGHT_PX, Math.floor(window.innerWidth * 0.8));
+  const getRightPx = () => {
+    const v = parseFloat(getComputedStyle(appEl).getPropertyValue("--right-pane-width"));
+    return Number.isFinite(v) ? v : 380;
+  };
+
+  makeResizable({
+    divider: appDivider,
+    axis: "x",
+    // Track viewer width = window width − right pane width.
+    getSize: () => Math.max(0, window.innerWidth - getRightPx()),
+    setSize: (viewerPx) => {
+      // Viewer grew → right pane shrunk by the same amount.
+      const right = window.innerWidth - viewerPx;
+      const clamped = Math.max(MIN_RIGHT_PX, Math.min(maxRightPx(), right));
+      appEl.style.setProperty("--right-pane-width", `${clamped}px`);
+      return clamped;
+    },
+    storageKey: "fastcad.rightPaneWidth",
+  });
+
+  // Ensure the saved width survives window resize: re-clamp on resize
+  // so a wider window doesn't leave us stuck at the old max.
+  window.addEventListener("resize", () => {
+    const cur = getRightPx();
+    const clamped = Math.max(MIN_RIGHT_PX, Math.min(maxRightPx(), cur));
+    if (clamped !== cur) appEl.style.setProperty("--right-pane-width", `${clamped}px`);
   });
 }
 
@@ -582,7 +965,10 @@ chatForm.addEventListener("submit", (ev) => {
   if (!text) return;
   addMessage("user", text);
   send({ type: "prompt", text });
+  pushHistory(text);
   chatInput.value = "";
+  // Fresh turn → allow a new persistence banner if it triggers.
+  if (window.fastcad) window.fastcad._persistenceBannerShown = false;
   setAgentStatus("thinking");
   bumpStuckTimer();
 });

@@ -186,9 +186,13 @@ bash scripts/e2e.sh                       # Playwright; needs chromium installed
 - Coordinates are millimeters; +Z is up. Anchor names: `origin`, `top`,
   `bottom`, `center`. Adding a new anchor is a `scene.resolve_anchor` +
   `tools.py` change; do not invent ad-hoc keywords elsewhere.
-- WebSocket message types: `scene_init`, `scene_delta`, `agent_message`,
-  `ask_user`, `tool_log`, `scad`, `error` (out); `prompt`, `user_choice`,
-  `undo`, `redo`, `reset`, `export_scad`, `ws_log_request` (in).
+- WebSocket message types: `scene_init`, `scene_delta`, `agent_message`
+  (carries `text` + per-turn `stats`), `ask_user`, `tool_log` (server
+  ships, frontend keeps in `wsLog` but doesn't render — progress panel
+  is the canonical live view), `progress`, `scad`, `error` (out);
+  `prompt`, `user_choice`, `undo`, `redo`, `reset`, `export_scad`,
+  `ws_log_request` (in). Transport is uvicorn's `websockets-sansio`
+  driver to avoid the legacy keepalive_ping race.
 - Mesh transport: positions = base64(float32 flat xyz), indices =
   base64(uint32 flat triangle list). Decoded in `web/main.js`.
 - Ids are stable strings: `<kind>_<n>` (e.g. `cube_1`). Tests rely on this.

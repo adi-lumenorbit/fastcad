@@ -246,11 +246,26 @@ includes `vision`).
 Iteration history is tracked in
 `SessionState.defect_history: list[list[Defect]]`. After each turn
 the orchestrator inspects the last N iterations for defect classes
-that keep recurring; persistence triggers the **fix-it critic**, an
-escalation step that produces a complete replacement code fragment
-rather than abstract advice. This is the system's safety valve when
-the regular feedback loop converges to a fixed point that isn't the
-right answer.
+that keep recurring; persistence triggers three layered responses:
+
+1. **Fix-it critic** (threshold 3 — `agent/critics/fixit.py`). Fires
+   in the vision-critic round and produces a complete replacement
+   code fragment rather than abstract advice.
+2. **UI warning** (threshold 3 — `critics_escalation` progress
+   event). The frontend renders an amber row in the progress panel
+   and posts a one-time `[warning]` chat banner so the user sees
+   "the agent is stuck on X" in real time.
+3. **Smart turn exit** (threshold 4 — `agent/client.py:_real_turn`
+   inline check). When the same defect class has appeared on each
+   of the last four iterations and the fix-it critic has already
+   fired, the turn ends with a concrete explanation pointing at
+   the recurring defect, instead of running to the
+   `max_tool_iterations` cap.
+
+The three layers form a graceful escalation: feedback at iteration
+3 → user notice at iteration 3 → forced exit at iteration 4. The
+system's safety valve when the regular feedback loop converges to
+a fixed point that isn't the right answer.
 
 ---
 
@@ -395,12 +410,12 @@ WS upgrade is gated by an Origin-header check when
 |------|--------|------|
 | `scene_init` | `nodes` | Initial scene + after undo / redo / reset. |
 | `scene_delta` | `added` / `updated` / `removed` | Incremental diff after a successful agent edit. |
-| `agent_message` | `text` | Final assistant reply for the turn. |
+| `agent_message` | `text`, `stats` | Final assistant reply for the turn. `stats` carries cost / elapsed / token totals. |
 | `ask_user` | `question`, `options` | Agent paused for disambiguation. |
-| `tool_log` | `calls` | One entry per tool call this turn. |
-| `progress` | `id`, `event`, `ts` | Streamed live during long-running tools (research subagent, critics). |
+| `tool_log` | `calls` | One entry per tool call this turn. The frontend keeps the payload for feedback bundles + ws_log inspection but does not render it in chat — the progress panel is the canonical live view. |
+| `progress` | `id`, `event`, `ts` | Streamed live during long-running tools (research subagent, critics). Notable `event.type` values: `tool_call_started/done/error`, `research_started/done/error`, `validation_defect`, `validation_pass`, `critics_escalation` (persistence detected — same defect class repeated). |
 | `scad` | `source` | Reply to `export_scad`. |
-| `error` | `message` | Protocol or agent error; shown in chat. |
+| `error` | `message` | Protocol or agent error; rendered with a `<details>` disclosure exposing recent WS traffic. |
 
 Mesh data flows in `nodes` / `added` / `updated` entries as base64-
 encoded `Float32Array` of positions and `Uint32Array` of indices.
@@ -408,13 +423,23 @@ Decoding happens once on the client; the per-id mesh map in
 `web/main.js` keeps every other mesh untouched across deltas — this
 is what makes rendering "incremental" rather than re-uploaded.
 
+The transport is uvicorn's `websockets-sansio` driver. The legacy
+`websockets` driver had a keepalive_ping race that severed the WS
+mid-turn under load (assertion in `_drain_helper`); switching to the
+sans-io path eliminates that class of bug.
+
 ---
 
 ## 9. Frontend
 
 `web/index.html` lays out two panes — viewer on the left, chat /
-progress panel on the right, with a draggable horizontal divider
-between chat-log and progress-panel.
+progress panel on the right. Two draggable dividers split the
+layout: an `#app-divider` between viewer and chat-pane (vertical),
+and a `#pane-divider` between chat-log and progress-panel
+(horizontal). Both share a single `makeResizable` helper in
+`main.js` that uses `event.movementX/Y` deltas — eliminates the
+dead-zone bug of an "anchored-delta" approach when the drag passes
+its clamp and reverses.
 
 `web/main.js` is the single ES module that:
 
@@ -423,11 +448,26 @@ between chat-log and progress-panel.
   touches only ids in its `added` / `updated` / `removed` lists.
 - Connects the WS, dispatches inbound messages, batches outbound.
 - Renders the chat + ask-user UI; uses `textContent` (not
-  `innerHTML`) for any agent-supplied text.
+  `innerHTML`) for any agent-supplied text. `[error]` and
+  `[warning]` agent messages get colored borders and an optional
+  `<details>` disclosure with recent WS traffic.
 - Streams `progress` events into the side panel as a running list
-  with per-tool-call status icons (▸ → ✓ / ✗).
-- Drives the agent-status indicator (idle / thinking / stuck) based
-  on inbound traffic.
+  with per-tool-call status icons (▸ → ✓ / ✗ / ⚠).
+- Drives the **agent-status indicator** with five states, each with
+  a glyph and a visible text label:
+  - `idle` (●, gray, "Idle")
+  - `thinking` (braille spinner, yellow, "Thinking…")
+  - `waiting` (◉, blue, "Waiting for you" — set on `ask_user`)
+  - `stuck` (⚠ pulsing, red, after 90 s of no progress events)
+  - `disconnected` (○, orange, on WS close — chat banner explains
+    why with a copy of the WS close code/reason and recent traffic).
+- Renders a per-turn **stats footer** under each `agent_message`:
+  cost (formatted as `Nm¢` / `N¢` / `$N`), elapsed (`Nms` / `N s` /
+  `Nm Ns`), and tokens (`input↑ output↓` plus `cached`). Hover for
+  full per-field breakdown.
+- Persists chat-input history (last 50 prompts) in localStorage.
+  ArrowUp / ArrowDown navigate; ArrowDown past newest restores the
+  in-progress draft (bash-readline pattern).
 
 `web/feedback.js` is loaded alongside and provides the
 "point at this thing and tell us what's wrong" overlay: it captures
