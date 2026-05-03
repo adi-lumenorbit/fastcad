@@ -98,3 +98,7 @@ plans live in `docs/plans/`.
 systemd unit, fail2ban jail, and an idempotent `bootstrap.sh` for
 a fresh Ubuntu 24.04 host. See `deploy/README.md` for the gcloud
 provisioning sequence.
+
+## License
+
+[MIT](LICENSE) — © 2026 adi.
