@@ -4,6 +4,8 @@ AI-driven incremental 3D modeler — OpenSCAD-compatible export, three.js
 viewer, Anthropic Claude as the modeling agent. Local web app, runs on
 Ubuntu/WSL with the browser on Windows.
 
+![fastcad UI overview — viewer on the left, chat + progress panel on the right](docs/screenshots/ui-overview.png)
+
 ## Quick start (WSL)
 
 ```
@@ -35,6 +37,16 @@ on first run, allow port 8765.
 - Per-turn cost + elapsed footer on each agent reply.
 - Undo / Redo / Reset, export `.scad` at any time, open in real
   OpenSCAD.
+
+| Iso render (browser) | Axial section (validator's eye) |
+|----------------------|----------------------------------|
+| <img src="docs/screenshots/m6-bolt-viewer.png" alt="M6 hex-head bolt rendered in the three.js viewer" width="320"> | <img src="docs/screenshots/m6-bolt-section-xz.png" alt="XZ axial cross-section showing real sawtooth thread profile" width="200"> |
+
+The XZ section on the right is what the section critic feeds back to
+the agent — paper-thin spike teeth show up unambiguously in 2D where
+they hide in a 3D iso render. That's how this thread profile got
+recovered after multiple iterations of the same agent producing
+"helical band of zero thickness" geometry.
 
 ## Tests
 
