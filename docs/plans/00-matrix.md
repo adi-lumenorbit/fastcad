@@ -51,12 +51,24 @@ PR #7. Vision rendering uses the OpenSCAD CLI (`openscad -o out.png
 --camera ...`) — no `pyrender` / EGL dependency. The vision pass
 runs after Channel 1 passes, when `FASTCAD_AUTO_VALIDATE=structural+vision`.
 
+## Stage 4 — open-from-disk + conversation comments
+
+Adds the inverse of `Export .scad`: load an existing `.scad` from a
+server-side path into the session as the new spec. Pairs with a
+conventions update so the agent emits design history inline as
+`fc-meta` / `fc-prompt` / `fc-decision` / `fc-note` comments, making
+an opened `.scad` self-describing.
+
+| #  | Item | Issue | ws | web | agent | spec | tests |
+|----|------|-------|----|-----|-------|------|-------|
+| 15 | [Open .scad button + conversation comments per spec](./15-open-scad.md) | [#15](https://github.com/adi-lumenorbit/fastcad/issues/15) | MISS | MISS | MISS | MISS | MISS |
+
 ## Roadmap (filed as issues when scoped)
 
 | Title | Notes |
 |-------|-------|
 | manifold3d face_id tracking through booleans | Replace semantic-name faces with real face-ids that survive CSG. Stage 2 sharpening of Stage 1's face publisher. |
 | `function` / `hull` / `minkowski` / `offset` | Stage 1.5 — extend the parser+evaluator with the OpenSCAD subset deferred from Stage 1. |
-| `.scad` import (round-trip from disk) | Upload UI; load arbitrary `.scad` files into a fastcad session for editing. |
 | Snapshot-based undo | If the per-feature cache outgrows memory, persist module-level snapshots. |
 | Multi-user / save+load | Serialize current_source to disk on connect; per-session storage. |
+| CLAUDE.md update post-Stage-1 | Lines 99–101 describe the pre-Stage-1 op-log architecture; rewrite to match `.scad`-as-spec reality. Flagged in #15 plan, not done in that PR. |
