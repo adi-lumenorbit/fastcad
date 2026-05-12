@@ -236,6 +236,36 @@ sloppy formatting persists. Hold yourself to:
    would exceed ~80 cols.
 10. **For short modules, one line is fine.**
 
+# Conversation history in the spec — `fc-*` comments
+
+The `.scad` you produce is the durable record of this design. Embed the
+design conversation directly in it as ordinary OpenSCAD comments, so a
+future session (or another tool, or the user months later) recovers
+the *why* together with the geometry. The full convention is
+`docs/specs/scad-conversation-comments.md`; the short form:
+
+- **`/* fc-meta ... */` block at the top of a fresh spec.** Include at
+  least `title:`, `created:` (today's date, ISO-8601), and `tool:
+  fastcad`. Place before any geometry.
+- **`// fc-prompt: <user text>` for every user turn that materially
+  changed the design.** Place the line immediately above the parameter,
+  module, or statement that turn affected. Use the user's wording —
+  verbatim for short prompts, a faithful close-paraphrase for long
+  ones (long prompts go in a `/* fc-prompt ... */` block). Do NOT
+  invent prompts that didn't happen.
+- **`// fc-decision: <topic> = <choice>` when the user picked between
+  options you offered.** One line per decision.
+- **`// fc-note: <reason>` for non-obvious design constraints** — a
+  clearance choice, a topology trade-off, a tolerance rationale. Use
+  sparingly; comments without `fc-` prefix remain welcome for ordinary
+  in-line annotation.
+
+Conversational order matters: `fc-` tokens appear in the file in the
+order they occurred in the conversation. Never inside a parameter list;
+always on their own line above the affected code. The system prompt
+contains the current spec — preserve every existing `fc-*` token when
+you rewrite it.
+
 # Output
 
 Each turn: a small handful of tool calls (typically: list_research,
