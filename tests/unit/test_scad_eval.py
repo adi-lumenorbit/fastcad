@@ -60,6 +60,21 @@ def test_rotate_in_xy_plane():
     assert (bb.ymax - bb.ymin) == pytest.approx(2.0, abs=1e-5)
 
 
+def test_color_is_geometry_identity():
+    """color() is a viewer-only modifier in OpenSCAD; fastcad accepts
+    it and emits the children's geometry unchanged. Color args of any
+    shape (name, rgb, rgba) are tolerated."""
+    out = _eval('color("red") cube([4, 5, 6]);')
+    me = out["color"]
+    bb = me.bbox
+    assert (bb.xmax - bb.xmin) == pytest.approx(4.0)
+    assert (bb.ymax - bb.ymin) == pytest.approx(5.0)
+    assert (bb.zmax - bb.zmin) == pytest.approx(6.0)
+    # rgba list form also tolerated.
+    out2 = _eval("color([0.2, 0.4, 0.6, 0.8]) sphere(r = 2);")
+    assert out2["color"].bbox.xmax == pytest.approx(2.0, abs=1e-4)
+
+
 def test_scale_doubles_extent():
     out = _eval("scale([2, 1, 1]) cube([1, 1, 1]);")
     me = out["scale"]
