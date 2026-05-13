@@ -71,11 +71,13 @@ def live_server(feedback_dir: Path) -> str:
     """Boots fastcad on a random port. Yields http://127.0.0.1:<port>."""
     port = _free_port()
     repo_root = Path(__file__).resolve().parents[2]
+    fixtures_dir = Path(__file__).resolve().parent / "fixtures"
     env = os.environ.copy()
     env.update(
         {
             "ANTHROPIC_FAKE": "1",
             "FASTCAD_FEEDBACK_DIR": str(feedback_dir),
+            "FASTCAD_OPEN_ALLOWED_DIRS": str(fixtures_dir),
             "PYTHONUNBUFFERED": "1",
         }
     )

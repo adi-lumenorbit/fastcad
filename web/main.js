@@ -740,6 +740,24 @@ function connect() {
 }
 
 function handleServerMessage(payload) {
+  // Open .scad dialog interception: when we're waiting on an
+  // open_scad reply, route the first error back into the dialog
+  // (instead of the chat panel) so the user can correct the path
+  // without losing the in-flight context. A scene_init means the
+  // load succeeded — close the dialog and fall through to the
+  // normal scene_init handling.
+  if (openInFlight) {
+    if (payload.type === "error") {
+      showOpenError(payload.message || "open failed");
+      openInFlight = false;
+      return;
+    }
+    if (payload.type === "scene_init") {
+      openInFlight = false;
+      closeOpenDialog();
+      // fall through to applySceneInit
+    }
+  }
   switch (payload.type) {
     case "scene_init": applySceneInit(payload); break;
     case "scene_delta": applySceneDelta(payload); break;
@@ -1364,6 +1382,76 @@ document.getElementById("undo-btn").addEventListener("click", () => send({ type:
 document.getElementById("redo-btn").addEventListener("click", () => send({ type: "redo" }));
 document.getElementById("export-btn").addEventListener("click", () => send({ type: "export_scad" }));
 document.getElementById("reset-btn").addEventListener("click", () => send({ type: "reset" }));
+
+// ---------------------------------------------------------------------------
+// Open .scad dialog
+// ---------------------------------------------------------------------------
+
+const openDialog = document.getElementById("open-dialog");
+const openBtn = document.getElementById("open-btn");
+const openForm = document.getElementById("open-form");
+const openPathInput = document.getElementById("open-path-input");
+const openErrorEl = document.getElementById("open-error");
+const openCancelBtn = document.getElementById("open-cancel-btn");
+// `openInFlight` is set when the user submits the dialog and cleared
+// on the next inbound error / scene_init. It lives in module scope so
+// `handleServerMessage` (defined earlier in the file) can read it.
+let openInFlight = false;
+
+function showOpenError(text) {
+  openErrorEl.textContent = text;
+  openErrorEl.hidden = false;
+}
+
+function clearOpenError() {
+  openErrorEl.hidden = true;
+  openErrorEl.textContent = "";
+}
+
+function showOpenDialog() {
+  clearOpenError();
+  openInFlight = false;
+  if (typeof openDialog.showModal === "function") {
+    openDialog.showModal();
+  } else {
+    // <dialog> is broadly supported but fall back to the open attribute
+    // so the form is at least usable in stripped-down browsers.
+    openDialog.setAttribute("open", "");
+  }
+  openPathInput.focus();
+  openPathInput.select();
+}
+
+function closeOpenDialog() {
+  openInFlight = false;
+  clearOpenError();
+  if (openDialog.open) openDialog.close();
+}
+
+openBtn.addEventListener("click", showOpenDialog);
+openCancelBtn.addEventListener("click", (ev) => {
+  ev.preventDefault();
+  closeOpenDialog();
+});
+
+openForm.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const path = openPathInput.value.trim();
+  if (!path) {
+    showOpenError("Path is required.");
+    return;
+  }
+  clearOpenError();
+  openInFlight = true;
+  send({ type: "open_scad", path });
+});
+
+// Pressing Escape on a <dialog> fires a `cancel` event; treat as Cancel
+// click so we keep the in-flight flag and error state consistent.
+openDialog.addEventListener("cancel", (ev) => {
+  ev.preventDefault();
+  closeOpenDialog();
+});
 const homeBtn = document.getElementById("home-btn");
 if (homeBtn) homeBtn.addEventListener("click", recenterCamera);
 

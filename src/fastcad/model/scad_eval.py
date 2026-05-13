@@ -652,6 +652,16 @@ def _builtin_polyhedron(call: ModuleCall, env: Env) -> Geometry:
 
 
 # Transforms accept a single child or a block.
+def _builtin_color(call: ModuleCall, env: Env) -> Geometry:
+    # OpenSCAD's `color()` is a viewer-only modifier — it has no effect
+    # on the resulting geometry. fastcad's renderer paints meshes from
+    # mesh-level material, not per-statement color, so we evaluate the
+    # children for their geometry and discard the color argument. This
+    # lets ordinary real-world `.scad` files (which sprinkle `color()`
+    # liberally for clarity) load through `open_scad` unchanged.
+    return eval_stmts(call.children, env)
+
+
 def _builtin_translate(call: ModuleCall, env: Env) -> Geometry:
     """OpenSCAD's `translate(v)`. `v` is a 2-vector for 2D children
     (the implicit z-component is 0) or a 3-vector for 3D. We accept
@@ -841,6 +851,7 @@ _BUILTIN_MODULES = {
     "rotate": _builtin_rotate,
     "scale": _builtin_scale,
     "mirror": _builtin_mirror,
+    "color": _builtin_color,
     "linear_extrude": _builtin_linear_extrude,
     "rotate_extrude": _builtin_rotate_extrude,
     "union": _builtin_union,

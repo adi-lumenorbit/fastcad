@@ -17,9 +17,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -50,8 +52,21 @@ _ALLOWED_TYPES = frozenset({
     "redo",
     "reset",
     "export_scad",
+    "open_scad",
     "ws_log_request",
 })
+
+# --- open_scad limits ----------------------------------------------------
+
+# Maximum .scad file size accepted by open_scad. A spec larger than
+# this is almost certainly outside the parser's working envelope; the
+# cap also bounds memory and rules out hostile inputs (e.g. a 1 GB
+# /dev/zero copy).
+_OPEN_MAX_BYTES = 1 * 1024 * 1024  # 1 MiB
+
+# Maximum path string length accepted by open_scad. Longer paths are
+# rejected without touching the filesystem.
+_OPEN_MAX_PATH_CHARS = 4096
 
 # Per-session prompt rate limits. Token-bucket with two windows: a burst
 # allowance (10 prompts in 60 s) and a daily ceiling (200 prompts in
@@ -334,6 +349,93 @@ async def handle(ws: WebSocket) -> None:
         return
 
 
+# --- open_scad helpers ----------------------------------------------------
+
+def _open_allowed_dirs() -> list[Path]:
+    """Directories the `open_scad` handler may read from.
+
+    Default allow-list is ``$HOME/src/3d-models`` and the fastcad repo
+    root (so a developer can experiment with checked-in `.scad`
+    fixtures). Override via the colon-separated environment variable
+    ``FASTCAD_OPEN_ALLOWED_DIRS``. Non-existent entries are silently
+    dropped — they can't be the parent of a real file anyway."""
+    raw = os.environ.get("FASTCAD_OPEN_ALLOWED_DIRS", "").strip()
+    if raw:
+        parts = [Path(p).expanduser() for p in raw.split(os.pathsep) if p.strip()]
+    else:
+        home = Path.home()
+        # This file is src/fastcad/server/ws.py; parents[3] is the repo root.
+        repo_root = Path(__file__).resolve().parents[3]
+        parts = [home / "src" / "3d-models", repo_root]
+    return [p.resolve() for p in parts if p.exists()]
+
+
+def _is_under(child: Path, parent: Path) -> bool:
+    """True iff `child` equals or is contained in `parent`. Both must
+    already be resolved (no symlinks left). Uses `relative_to` rather
+    than string-prefix to avoid `/foo/bar` matching `/foo/barbaz`."""
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_open_path(raw: Any) -> tuple[Path | None, str | None]:
+    """Validate a user-supplied path for `open_scad`.
+
+    Returns `(resolved_path, None)` on success, or `(None, reason)`
+    when the path is rejected. The path is resolved with
+    ``strict=True`` so symlinks are followed and missing files fail
+    fast; the allow-list check then runs against the real target,
+    not whatever a symlink claimed."""
+    if not isinstance(raw, str):
+        return None, "path must be a string"
+    if not raw:
+        return None, "path must be non-empty"
+    if len(raw) > _OPEN_MAX_PATH_CHARS:
+        return None, "path too long"
+    if not raw.lower().endswith(".scad"):
+        return None, "path must end in .scad"
+    try:
+        resolved = Path(raw).expanduser().resolve(strict=True)
+    except FileNotFoundError:
+        return None, f"path not found: {raw}"
+    except OSError as e:
+        return None, f"path error: {e}"
+    if not resolved.is_file():
+        return None, "path is not a regular file"
+    allowed = _open_allowed_dirs()
+    if not any(_is_under(resolved, d) for d in allowed):
+        return None, "path is not inside any allow-listed directory"
+    try:
+        size = resolved.stat().st_size
+    except OSError as e:
+        return None, f"stat error: {e}"
+    if size > _OPEN_MAX_BYTES:
+        return None, f"file too large ({size} > {_OPEN_MAX_BYTES} bytes)"
+    return resolved, None
+
+
+_FC_META_BLOCK_RE = re.compile(r"/\*\s*fc-meta\b(.*?)\*/", re.DOTALL)
+_FC_META_KEY_RE = re.compile(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+?)\s*$")
+
+
+def _extract_fc_meta_title(text: str) -> str | None:
+    """Return the `title` value from the first `fc-meta` block in
+    `text`, or None when the file has no `fc-meta` block or no
+    `title` key inside it. Per the SCAD-conversation comment spec
+    (`docs/specs/scad-conversation-comments.md`)."""
+    m = _FC_META_BLOCK_RE.search(text)
+    if not m:
+        return None
+    for line in m.group(1).splitlines():
+        km = _FC_META_KEY_RE.match(line)
+        if km and km.group(1) == "title":
+            return km.group(2)
+    return None
+
+
 async def _dispatch(ws: WebSocket, ctx: WSContext, msg: dict[str, Any]) -> None:
     typ = msg.get("type")
     if typ == "prompt":
@@ -400,6 +502,31 @@ async def _dispatch(ws: WebSocket, ctx: WSContext, msg: dict[str, Any]) -> None:
         # The spec source IS the export — no translation layer.
         await _send(ws, ctx, {"type": "scad", "source": ctx.session.current_source})
         return
+    if typ == "open_scad":
+        resolved, err = _validate_open_path(msg.get("path"))
+        if err is not None:
+            await _send(ws, ctx, {"type": "error", "message": f"open_scad: {err}"})
+            return
+        assert resolved is not None  # narrowing for type checkers
+        try:
+            text = resolved.read_text(encoding="utf-8")
+        except OSError as e:
+            await _send(ws, ctx, {"type": "error", "message": f"open_scad: read failed: {e}"})
+            return
+        try:
+            ctx.session.set_source(text)
+        except Exception as e:  # noqa: BLE001 — parser/evaluator errors are intentionally broad
+            await _send(ws, ctx, {"type": "error", "message": f"open_scad: parse/eval failed: {e}"})
+            return
+        # Wholesale replacement → scene_init, not scene_delta.
+        await _send(ws, ctx, _scene_init(ctx))
+        # Summary: file name, byte count, plus the fc-meta title when present.
+        summary = [f"opened {resolved.name}", f"{len(text)} bytes"]
+        title = _extract_fc_meta_title(text)
+        if title:
+            summary.append(f"title: {title}")
+        await _send(ws, ctx, {"type": "agent_message", "text": " — ".join(summary)})
+        return
     if typ == "ws_log_request":
         await _send(ws, ctx, {"type": "ws_log", "log": list(ctx.ws_log[-200:])})
         return
@@ -412,8 +539,7 @@ async def _dispatch(ws: WebSocket, ctx: WSContext, msg: dict[str, Any]) -> None:
 # Anything else in 0x00-0x1f / 0x7f is most likely an injection attempt
 # (ANSI escapes, NUL bytes for log poisoning, etc.) and never appears in
 # legitimate user prose.
-import re as _re  # imported here to keep the module-top imports tidy
-_PROMPT_CONTROL_RE = _re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_PROMPT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _clean_prompt_text(raw: Any) -> str | None:
