@@ -150,9 +150,19 @@ function applySceneDelta(payload) {
 function resize() {
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
-  if (renderer.domElement.width !== w || renderer.domElement.height !== h) {
+  if (w === 0 || h === 0) return;        // not laid out yet
+  // Bug: the previous guard compared the drawing-buffer dimensions
+  // (renderer.domElement.width = w * devicePixelRatio) against the
+  // CSS dimensions (w). At pixelRatio === 1 the two coincidentally
+  // match on the first frame, the guard skips, and camera.aspect
+  // stays at its constructor default of 1 → everything renders
+  // stretched along whichever axis the canvas is longer on. Compare
+  // against camera.aspect directly so the fix doesn't depend on
+  // display DPI.
+  const aspect = w / h;
+  if (camera.aspect !== aspect) {
     renderer.setSize(w, h, false);
-    camera.aspect = w / h;
+    camera.aspect = aspect;
     camera.updateProjectionMatrix();
   }
 }
