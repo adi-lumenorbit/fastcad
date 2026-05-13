@@ -82,27 +82,34 @@ runtime context.
 
 ## Critical Design Rules
 
-> **Before any change to `src/fastcad/model/scene.py`,
-> `src/fastcad/model/kernel.py`, `src/fastcad/session.py`,
-> `src/fastcad/agent/tools.py`, or `web/main.js`** — read the rules below.
-> Tests in `tests/unit/` enforce most of these contracts; if you break a
-> rule the tests will tell you, but they don't replace understanding.
+> **Before any change to `src/fastcad/model/kernel.py`,
+> `src/fastcad/model/scad_eval.py`, `src/fastcad/model/scad_parser.py`,
+> `src/fastcad/session.py`, `src/fastcad/agent/tools.py`, or
+> `web/main.js`** — read the rules below. Tests in `tests/unit/`
+> and `tests/equivalence/` enforce most of these contracts.
 
 - **`kernel.py` is the only place that imports `manifold3d`.** All other
   modules treat `Manifold` as opaque. Swapping kernels later must be local
   to this file.
-- **Ops are immutable.** `AddPrimitive` and `Boolean` are frozen
-  dataclasses. Never mutate an op after appending it to the log.
-- **Every mutation goes through `session.py`.** The op log is the single
-  source of truth for both render and feedback replay. Never mutate
-  `SceneGraph` directly from `server/ws.py` or anywhere else.
-- **`SceneGraph` is the render source.** The `.scad` file is **export
-  only** — never used as input. If renderer and `.scad` ever disagree,
-  the renderer is correct by definition; fix `model/scad.py`.
+- **`session.current_source` is the single source of truth.** The whole
+  scene is derived from this one OpenSCAD-compatible source string;
+  there is no separate op log or scene graph that could drift. Every
+  mutation goes through `SessionState.set_source(text)`, which parses,
+  validates, runs the dependency-aware re-evaluation, and pushes the
+  previous spec onto the undo stack. The `.scad` source is both the
+  render input and the export — what the user sees IS what they get.
+- **Every new parser/evaluator construct ships with an equivalence
+  fixture.** Drop a small `.scad` file in `tests/equivalence/fixtures/`
+  exercising the construct; the suite renders it through both
+  OpenSCAD's CLI and fastcad's evaluator and asserts the resulting
+  solid agrees on volume + bbox within tight tolerance. This is the
+  long-running net against silent geometry divergences (it caught the
+  rotate-axis-angle, cylinder-cone, 2D-translate, and twist-sign
+  bugs).
 - **Per-id mesh map in `web/main.js` is incremental rendering.** A
   `scene_delta` must only touch meshes whose ids are in `added` /
   `updated` / `removed`. Wholesale rebuilds are reserved for
-  `scene_init` (sent on undo/redo/reset).
+  `scene_init` (sent on undo/redo/reset/open_scad).
 - **Every UI change ships with a Playwright test.** No blind CSS/JS edits.
   See `tests/e2e/`. If you change a `data-testid` or a UI flow, update
   the test in the same commit.
@@ -115,35 +122,44 @@ runtime context.
 ```
 src/fastcad/
   __main__.py              uvicorn entry (`python -m fastcad`)
-  session.py               op log + head; undo/redo via full replay
+  session.py               SessionState: current_source + parse cache + undo/redo
   server/
     app.py                 FastAPI app, static mount, /ws, /feedback, /healthz
     ws.py                  WebSocket session loop (message protocol)
     feedback.py            POST /feedback handler -> tmp/feedback/<ts>/
   model/
     kernel.py              manifold3d wrappers + mesh-to-dict
-    scene.py               SceneGraph, Node, anchor resolver
-    ops.py                 Op dataclasses + ChangeSet
-    scad.py                op log -> OpenSCAD source
+    scad_parser.py         lark grammar + AST for the OpenSCAD subset
+    scad_eval.py           AST -> manifold; built-in primitives, transforms, CSG
+    spec_diff.py           dependency-aware per-node re-evaluation cache
+    sections.py            2D cross-section extraction + PNG + metrics
+    validate.py            Channel 1 — structural validator
+    render.py              Channel 2 — OpenSCAD CLI -> canonical-angle PNGs
   agent/
     client.py              Anthropic tool-use loop + ANTHROPIC_FAKE mode
     tools.py               tool schemas + dispatcher
     system_prompt.py       modeling-agent system prompt
+    critics/               vision critic orchestrator + per-critic modules
 web/
-  index.html               two-pane layout (viewer + chat)
-  main.js                  three.js viewer, WS client, chat
+  index.html               two-pane layout (viewer + chat) + Open .scad dialog
+  main.js                  three.js viewer, WS client, chat, section feature
   feedback.js              point-mode overlay, rrweb, capture bundle POST
-  vendor/                  pinned three.js, rrweb, html2canvas (gitignored)
+  vendor/                  pinned three.js + OrbitControls + TransformControls
+                           + rrweb + html2canvas (gitignored)
 tests/
   unit/                    fast, no-network, no-browser
   e2e/                     Playwright headless Chromium (skips if missing)
+  equivalence/             OpenSCAD-vs-fastcad fixture suite — each fixture
+                           rendered by both engines, volume + bbox compared
+                           (skips if the `openscad` CLI isn't on PATH)
 scripts/
   dev.sh                   uvicorn dev server
   fetch-vendor.sh          one-time download of browser libs into web/vendor/
   e2e.sh                   pytest tests/e2e
 docs/plans/                NN-slug.md per CLAUDE-issue.md convention
+docs/specs/                normative specs (e.g. SCAD-conversation comments)
 tmp/feedback/<ts>/         user-submitted bug bundles (description, rrweb,
-                           screenshots, op log, ws log, camera, target)
+                           screenshots, ws log, camera, target, scad source)
 ```
 
 ## Setup
@@ -191,8 +207,9 @@ bash scripts/e2e.sh                       # Playwright; needs chromium installed
   ships, frontend keeps in `wsLog` but doesn't render — progress panel
   is the canonical live view), `progress`, `scad`, `error` (out);
   `prompt`, `user_choice`, `undo`, `redo`, `reset`, `export_scad`,
-  `ws_log_request` (in). Transport is uvicorn's `websockets-sansio`
-  driver to avoid the legacy keepalive_ping race.
+  `open_scad` (server-side path), `ws_log_request` (in). Transport is
+  uvicorn's `websockets-sansio` driver to avoid the legacy
+  keepalive_ping race.
 - Mesh transport: positions = base64(float32 flat xyz), indices =
   base64(uint32 flat triangle list). Decoded in `web/main.js`.
 - Ids are stable strings: `<kind>_<n>` (e.g. `cube_1`). Tests rely on this.

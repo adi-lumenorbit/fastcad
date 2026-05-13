@@ -61,14 +61,73 @@ an opened `.scad` self-describing.
 
 | #  | Item | Issue | ws | web | agent | spec | tests |
 |----|------|-------|----|-----|-------|------|-------|
-| 15 | [Open .scad button + conversation comments per spec](./15-open-scad.md) | [#15](https://github.com/adi-lumenorbit/fastcad/issues/15) | MISS | MISS | MISS | MISS | MISS |
+| 15 | [Open .scad button + conversation comments per spec](./15-open-scad.md) | [#15](https://github.com/adi-lumenorbit/fastcad/issues/15) | OK | OK | OK | OK | OK |
+
+## Stage 4.1 — interactive section plane
+
+Viewer-only sectioning along the X / Y / Z axis with a draggable
+clipping-plane gizmo. `Cut X` / `Cut Y` / `Cut Z` toolbar buttons +
+hotkeys 1/2/3/0. `TransformControls` translates the visualisation
+plane along the active axis; `OrbitControls` is paused during the
+drag.
+
+| #  | Item | Issue | web | vendor | tests |
+|----|------|-------|-----|--------|-------|
+| 17 | [Optional X/Y/Z section plane in the viewer](./17-section-plane.md) | [#17](https://github.com/adi-lumenorbit/fastcad/issues/17) | OK | OK | OK |
+
+## Stage 4.2 — section caps + per-object colors
+
+Each cut solid gets its own stencil-based cap quad (per-mesh section
+bundle: back-face + front-face stencil shadows sharing the user
+mesh's geometry, plus a cap quad masked by `stencil != 0` with
+`ReplaceStencilOp` resetting the stencil). Cross-sections render as
+solid axis-tinted faces instead of hollow shells. Per-mesh
+`MeshStandardMaterial` instances with HSL-hash colours derived from
+the node id make multi-module models visually distinct. Three real
+bugs were stacked here (no `stencil: true` on the WebGLRenderer
+config; `renderer.clearStencil()` being a setter and not a clear;
+sectionViz translucent plane painting over the caps in the
+transparent pass) — `tests/e2e/test_section_caps.py` locks them
+down.
+
+| #  | Item | Issue | web | tests |
+|----|------|-------|-----|-------|
+| 20 | [Section caps + per-object colors](./20-section-caps-colors.md) | [#20](https://github.com/adi-lumenorbit/fastcad/issues/20) | OK | OK |
+
+## Stage 5 — language subset extensions + equivalence regression net
+
+First slice of the Stage 1.5 roadmap (`hull / minkowski / offset /
+function`). Adds `hull()` as a manifold3d-backed builtin, excludes
+reserved keywords (`for / if / else / let / module / function / true
+/ false / undef`) from module-call names so bare-for-after-transform
+parses, and seeds `$preview = false` / `$t = 0.0` so real-world
+files that branch on those special vars load.
+
+Companion: `tests/equivalence/` — a fixture-driven suite that runs
+each `tests/equivalence/fixtures/*.scad` through both OpenSCAD's
+CLI and fastcad's evaluator and asserts the resulting solids agree
+on volume + bbox within tolerance. Surfaced four evaluator bugs in
+the process (all fixed in the same PR):
+
+1. `rotate(angle, [axis])` axis-angle form was being silently dropped
+   to `rotate(angle)` (Z only).
+2. `cylinder(h, r1, r2)` ignored `r2` — frustums rendered as full
+   cylinders.
+3. `translate([x, y])` (2-vector) rejected on 2D children.
+4. `linear_extrude(twist=N)` twisted opposite to OpenSCAD (manifold3d
+   sign convention).
+
+| #  | Item | Issue | parser | eval | tests |
+|----|------|-------|--------|------|-------|
+| 22 | [hull() + reserved-keyword + $preview](./22-hull-builtin.md) | [#22](https://github.com/adi-lumenorbit/fastcad/issues/22) | OK | OK | OK |
+| 24 | [OpenSCAD equivalence test suite (+ 4 evaluator bug fixes)](./24-equivalence-suite.md) | [#24](https://github.com/adi-lumenorbit/fastcad/issues/24) | OK | OK | OK |
 
 ## Roadmap (filed as issues when scoped)
 
 | Title | Notes |
 |-------|-------|
 | manifold3d face_id tracking through booleans | Replace semantic-name faces with real face-ids that survive CSG. Stage 2 sharpening of Stage 1's face publisher. |
-| `function` / `hull` / `minkowski` / `offset` | Stage 1.5 — extend the parser+evaluator with the OpenSCAD subset deferred from Stage 1. |
+| `minkowski` / `offset` / `function` | Remainder of Stage 1.5 — `hull` shipped in #22. The other three need design work that hull didn't (offset's join styles, minkowski's domain restrictions, function syntax). |
+| Real-mesh section caps via manifold3d-wasm | Replace the stencil-based section caps with real triangulated cap polygons computed from a manifold3d-wasm worker. First-class scene nodes that can be exported / picked / measured. Trigger: when `inspect_section` / measurement / export need a real cap mesh. |
 | Snapshot-based undo | If the per-feature cache outgrows memory, persist module-level snapshots. |
 | Multi-user / save+load | Serialize current_source to disk on connect; per-session storage. |
-| CLAUDE.md update post-Stage-1 | Lines 99–101 describe the pre-Stage-1 op-log architecture; rewrite to match `.scad`-as-spec reality. Flagged in #15 plan, not done in that PR. |

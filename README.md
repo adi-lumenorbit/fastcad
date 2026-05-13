@@ -35,8 +35,23 @@ on first run, allow port 8765.
 - Cached research entries in `docs/research/` give the agent canonical
   spec data for standardized parts.
 - Per-turn cost + elapsed footer on each agent reply.
-- Undo / Redo / Reset, export `.scad` at any time, open in real
-  OpenSCAD.
+- **Open .scad from disk.** Drop in any existing `.scad` (or one
+  produced by another tool) via the **Open .scad** toolbar button.
+  Pairs with the SCAD-conversation comment spec
+  (`docs/specs/scad-conversation-comments.md`) so the agent emits
+  design history inline as `fc-meta` / `fc-prompt` / `fc-decision`
+  / `fc-note` comments — an opened file carries its own design
+  conversation back into a future session.
+- **Interactive section plane.** Toolbar buttons `Cut X` / `Cut Y` /
+  `Cut Z` (hotkeys `1` / `2` / `3`, `0` to turn off) clip the scene
+  with a draggable plane. Each cut solid is filled with a stencil-
+  based cap in the axis tint so cross-sections read as solid
+  CAD-style faces, not hollow shells.
+- **Per-object colors.** Each top-level module renders in its own
+  deterministic colour (HSL hash of the node id), so the parts of a
+  multi-module model are distinguishable at a glance.
+- Undo / Redo / Reset / Open .scad / Export .scad — round-trip with
+  real OpenSCAD any time.
 
 | Iso render (browser) | Axial section (validator's eye) |
 |----------------------|----------------------------------|
@@ -51,14 +66,19 @@ recovered after multiple iterations of the same agent producing
 ## Tests
 
 ```
-.venv/bin/pytest tests/unit -q             # ~280 unit tests (kernel, scene,
-                                           # session, scad, agent, ws, feedback,
-                                           # validate, sections, security, …)
+.venv/bin/pytest tests/unit -q             # ~290 unit tests (kernel,
+                                           # parser, evaluator, session, scad,
+                                           # agent, ws, feedback, validate,
+                                           # sections, security, open_scad, …)
 bash scripts/e2e.sh                         # Playwright headless Chromium
+.venv/bin/pytest tests/equivalence -q       # OpenSCAD-vs-fastcad equivalence
+                                           # suite — fixture-driven; skips
+                                           # if the openscad CLI isn't on PATH
 ```
 
 E2E tests skip cleanly if Chromium isn't installed, so a fresh `pytest`
-won't fail on a machine that hasn't run `playwright install` yet.
+won't fail on a machine that hasn't run `playwright install` yet. The
+equivalence suite skips the same way when OpenSCAD isn't installed.
 
 ## Reporting UI bugs
 

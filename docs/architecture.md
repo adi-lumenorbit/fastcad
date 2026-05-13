@@ -127,23 +127,52 @@ The parser (`model/scad_parser.py`, lark grammar) accepts a
 deliberately small subset of OpenSCAD:
 
 - **Statements**: `name = expr;`, `module name(args) { ... }`, module
-  calls, `for (var = [start:end])`, `if/else`, `let(...) statement`,
-  block statements.
+  calls, `for (var = [start:end])` or `[start:step:end]` or `[list]`,
+  `if/else`, `let(...) statement`, block statements. Reserved
+  keywords (`for / if / else / let / module / function / true /
+  false / undef`) are excluded from module-call names so
+  `rotate(...) for(...) { ... }` parses as a `for` statement rather
+  than a module call named `for`.
 - **Expressions**: numbers, vectors, arithmetic / comparison / boolean,
   ternary, function calls, vector indexing.
 - **Built-in functions**: `sin / cos / tan / asin / acos / atan /
-  atan2 / sqrt / pow / abs / min / max / floor / ceil / round / len /
-  concat`, plus the constant `PI`.
+  atan2 / sqrt / pow / exp / ln / log / abs / min / max / floor /
+  ceil / round / len / concat / norm / cross`, plus the constant
+  `PI`.
 - **Built-in modules**: 3D primitives `cube / sphere / cylinder /
   polyhedron`; 2D primitives `circle / square / polygon`; extrusions
-  `linear_extrude / rotate_extrude`; transforms `translate / rotate /
-  scale / mirror`; CSG `union / difference / intersection`.
-- **Special vars**: `$fn`.
+  `linear_extrude(height=, twist=, scale=, slices=)` and
+  `rotate_extrude(angle=)`; transforms `translate / rotate / scale /
+  mirror / color`; CSG `union / difference / intersection / hull`.
+- **`cylinder` accepts all three radius forms.** `r` (or `d`) for a
+  straight cylinder; `r1 / r2` (or `d1 / d2`) for a frustum / cone;
+  the positional `cylinder(h, r1, r2)` shape works too.
+- **`rotate` accepts all three forms.** `rotate([rx, ry, rz])` for
+  XYZ Euler; `rotate(angle)` as the Z-only shortcut; and
+  `rotate(angle, [vx, vy, vz])` for axis-angle (Rodrigues rotation,
+  applied via `manifold.transform()`).
+- **`translate([x, y])`** is also accepted on 2D children (the
+  implicit z-component is 0).
+- **`color(...)` is a no-op identity transform** — the visualizer
+  paints meshes via per-mesh hashed-hue colours, not per-statement
+  `color()` calls, so the builtin just returns its children's
+  geometry unchanged.
+- **Special vars**: `$fn` (segment count, primary); `$fa` / `$fs`
+  are parsed but currently ignored. `$preview` defaults to `false`
+  and `$t` to `0.0` so files that branch on those special vars load
+  without modification (real OpenSCAD's GUI seeds them; fastcad
+  always "renders", never "previews").
 
 Out of scope (parser rejects): `function` definitions, `include`,
-`use`, `import`, `hull`, `minkowski`, `offset`, `projection`, `text`,
+`use`, `import`, `minkowski`, `offset`, `projection`, `text`,
 `surface`, `assert`, `echo`. The agent is told it cannot rely on
 external libraries — there is no `include` mechanism.
+
+The `tests/equivalence/` suite (see § 12) holds the parser +
+evaluator to a tight contract: every fixture file under
+`tests/equivalence/fixtures/` is rendered through both OpenSCAD's
+CLI and fastcad's evaluator and the resulting solids must agree on
+volume + bounding box within tolerance.
 
 ### 4.2 Evaluation and the dependency cache
 
@@ -395,8 +424,9 @@ WebSocket messages between browser and server.
 |------|--------|--------|
 | `prompt` | `text` | Run an agent turn. Subject to per-session rate limit and prompt sanitization. |
 | `user_choice` | `text` | Reply to a pending `ask_user`; must match one of the offered options. |
-| `undo` / `redo` / `reset` | — | Move along the op log; emit a fresh `scene_init`. |
+| `undo` / `redo` / `reset` | — | Step through the session's undo stack (or clear); emit a fresh `scene_init`. |
 | `export_scad` | — | Server replies with `{type: "scad", source}`. |
+| `open_scad` | `path` | Load a `.scad` file from a server-side path as the new spec. Path must end in `.scad`, be inside the allow-list (`$HOME/src/3d-models` + repo root by default, override via `FASTCAD_OPEN_ALLOWED_DIRS`), be ≤ 1 MiB, and parse + evaluate cleanly. Success emits a fresh `scene_init` and an `agent_message` summary (file name, byte count, plus the `fc-meta` title if present). Failure emits `error` and leaves state untouched; undo/redo are preserved either way. |
 | `ws_log_request` | — | Server replies with the recent inbound + outbound message log (used for feedback bundles). |
 
 Inbound frames are size-capped (64 KB), JSON-validated, type-
@@ -443,10 +473,34 @@ its clamp and reverses.
 
 `web/main.js` is the single ES module that:
 
-- Sets up the three.js renderer + scene + camera + OrbitControls.
+- Sets up the three.js renderer + scene + camera + OrbitControls +
+  TransformControls (used by the section-plane drag handle).
+  `WebGLRenderer({ stencil: true })` is required for the stencil-
+  based section cap pipeline.
 - Maintains `meshMap: Map<id, THREE.Mesh>`. Every WS `scene_delta`
   touches only ids in its `added` / `updated` / `removed` lists.
+  Each mesh gets its own `MeshStandardMaterial` with a deterministic
+  HSL hue derived from a FNV-1a hash of the node id (per-object
+  colours).
 - Connects the WS, dispatches inbound messages, batches outbound.
+- Hosts the **Open .scad dialog** — `<dialog id="open-dialog">` with a
+  server-side path input. On submit, sends an `open_scad` message;
+  server errors render inline in the dialog without mutating state,
+  success closes the dialog on `scene_init`.
+- Hosts the **section plane feature**. Four toolbar buttons (`Cut X`
+  / `Cut Y` / `Cut Z` / `Off`) plus hotkeys `1` / `2` / `3` / `0`
+  toggle a clipping plane along the chosen axis. A draggable
+  visualisation outline (a `PlaneGeometry` quad with `TransformControls`
+  set to translate-only along the active axis) lets the user slide
+  the cut interactively; `OrbitControls.enabled` is paused during
+  the drag via the gizmo's `dragging-changed` event. Each user
+  mesh gets a **section bundle** of three additional Mesh children
+  added to the scene via `renderOrder`: a back-face stencil shadow
+  (writes stencil), a front-face stencil shadow (writes stencil),
+  and an axis-tinted cap quad masked by `stencil != 0` with
+  `ReplaceStencilOp` resetting stencil so the next solid starts
+  clean. One `renderer.render()` call handles stencil + cap + color
+  via render order — no multi-pass logic.
 - Renders the chat + ask-user UI; uses `textContent` (not
   `innerHTML`) for any agent-supplied text. `[error]` and
   `[warning]` agent messages get colored borders and an optional
@@ -555,14 +609,18 @@ See `deploy/README.md` for the operational view.
 | Critics | `tests/unit/test_critic.py` | Orchestrator; per-critic shape; persistence detection. |
 | Tools | `tests/unit/test_agent_tools.py` | Each tool dispatch; `inspect_section` axes + oblique + error paths. |
 | Sanitization | `tests/unit/test_security.py` | Slug whitelist; topic sanitizer; prompt cleaner; rate limiter. |
-| Sessions / WS | `tests/unit/test_session.py`, `test_ws.py` | State transitions; message dispatch. |
-| End-to-end | `tests/e2e/` | Playwright headless Chromium against a live dev server. |
+| Sessions / WS | `tests/unit/test_session.py`, `test_ws.py`, `test_open_scad.py` | State transitions; message dispatch; `open_scad` path validator + dispatch. |
+| End-to-end | `tests/e2e/` | Playwright headless Chromium against a live dev server. Covers Open .scad, section plane, section caps, per-object colors, camera aspect, and the original cube/undo/feedback flows. |
+| Equivalence | `tests/equivalence/` | Per-fixture diff: render each `tests/equivalence/fixtures/*.scad` through OpenSCAD's CLI and through fastcad's evaluator; compare volume + bbox within tolerance. Skips when the `openscad` binary isn't on PATH. |
 
 The unit suite is fast (~5 s) and runs without the browser, without
 the Anthropic API, and without OpenSCAD installed (vision-critic
 paths skip cleanly when the renderer isn't available). The e2e
 suite needs Playwright + Chromium and exercises the WS protocol
-against the deployed page.
+against the deployed page. The equivalence suite is what catches
+silent geometry divergences between fastcad's evaluator and
+OpenSCAD's reference — adding a new fixture is just dropping a
+`.scad` in `tests/equivalence/fixtures/`.
 
 ---
 
@@ -600,13 +658,25 @@ files listed in `CLAUDE.md`'s "Critical Design Rules" section:
 - **`kernel.py` is the only place that imports `manifold3d`.** Every
   other module treats `Manifold` as opaque. Swapping the CSG kernel
   later must remain local to that file.
-- **`SessionState` is the render source. The `.scad` file is
-  export only.** If renderer and `.scad` ever disagree, the
-  renderer is correct by definition; fix the export path.
+- **`session.current_source` is the single source of truth.** The
+  scene's whole state is derived from this one `.scad` source
+  string; every mutation goes through `SessionState.set_source(text)`,
+  which parses, validates, runs dependency-aware re-evaluation, and
+  pushes the previous spec onto the undo stack. There is no parallel
+  internal representation that could drift away from the file the
+  user exports.
+- **Every new evaluator construct ships with an equivalence
+  fixture.** Drop a small `.scad` file under
+  `tests/equivalence/fixtures/`; the suite renders it through both
+  OpenSCAD's CLI and fastcad's evaluator and asserts the resulting
+  solids agree on volume + bbox within tolerance. This is what
+  caught the rotate-axis-angle, cylinder-cone, 2D-translate, and
+  twist-sign bugs — silent geometry divergences need a regression
+  net.
 - **Per-id mesh map in `web/main.js` is incremental rendering.** A
   `scene_delta` must touch only ids in `added` / `updated` /
   `removed`. Wholesale rebuilds are reserved for `scene_init`
-  (sent on undo / redo / reset).
+  (sent on undo / redo / reset / open_scad).
 - **Every UI change ships with a Playwright test.** No blind CSS /
   JS edits. If you change a `data-testid` or a UI flow, update the
   test in the same commit.
