@@ -98,6 +98,30 @@ html, body {
   background: rgba(255, 255, 255, 0.1);
 }
 
+#viewer-overlay .overlay-group {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  padding-left: 10px;
+  border-left: 1px solid #3a3a3a;
+}
+
+/* Active section axis: tint the button so the user sees which axis
+   is currently cutting the scene. Colors match the visualization
+   plane (red = X, green = Y, blue = Z). */
+#viewer-overlay button.section-active[data-axis="x"] {
+  border-color: #d77;
+  color: #fbb;
+}
+#viewer-overlay button.section-active[data-axis="y"] {
+  border-color: #7d7;
+  color: #bfb;
+}
+#viewer-overlay button.section-active[data-axis="z"] {
+  border-color: #79d;
+  color: #b9f;
+}
+
 #chat-pane {
   display: flex;
   flex-direction: column;
