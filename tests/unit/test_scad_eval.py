@@ -110,6 +110,81 @@ intersection() {
     assert k.volume(me.manifold) == pytest.approx(1.0, abs=1e-5)
 
 
+def test_hull_of_two_displaced_cubes_makes_capsule():
+    """hull() of two unit cubes 4mm apart in X produces the smallest
+    convex shape containing both — bbox spans the full extent, volume
+    is bigger than just the two cubes combined."""
+    src = """
+hull() {
+  cube([1, 1, 1]);
+  translate([4, 0, 0]) cube([1, 1, 1]);
+}
+"""
+    out = _eval(src)
+    me = out["hull"]
+    bb = me.bbox
+    # bbox extends from x=0 to x=5 (two unit cubes 4mm apart).
+    assert (bb.xmax - bb.xmin) == pytest.approx(5.0, abs=1e-5)
+    assert (bb.ymax - bb.ymin) == pytest.approx(1.0, abs=1e-5)
+    assert (bb.zmax - bb.zmin) == pytest.approx(1.0, abs=1e-5)
+    # Convex hull is bigger than the two disconnected cubes (vol = 2);
+    # it fills the gap between them too. Should be the full bbox = 5.
+    from fastcad.model import kernel as k
+    assert k.volume(me.manifold) == pytest.approx(5.0, abs=1e-3)
+
+
+def test_hull_of_two_cylinders_is_capsule_shaped():
+    """The user's wire-twister pattern: hull() over two displaced
+    cylinders making a slot."""
+    src = """
+hull() {
+  cylinder(h = 2, r = 1);
+  translate([5, 0, 0]) cylinder(h = 2, r = 1);
+}
+"""
+    out = _eval(src)
+    me = out["hull"]
+    bb = me.bbox
+    # Capsule spans from x = -1 to x = 6, so 7 units across.
+    assert (bb.xmax - bb.xmin) == pytest.approx(7.0, abs=1e-3)
+    # In Y, only the cylinder radius extent: -1 to +1.
+    assert (bb.ymax - bb.ymin) == pytest.approx(2.0, abs=1e-3)
+
+
+def test_preview_default_is_false():
+    """`$preview` is a real-OpenSCAD special variable set by the host
+    application. fastcad always renders, so `$preview` defaults to
+    false — files that branch on it still parse."""
+    src = """
+$fn = $preview ? 8 : 64;
+cylinder(h = 1, r = 1);
+"""
+    out = _eval(src)
+    me = out["cylinder"]
+    # With $preview = false, $fn = 64 → cylinder uses 64 segments,
+    # so bbox is close to a true circle in XY (~ within rounding).
+    bb = me.bbox
+    assert (bb.xmax - bb.xmin) == pytest.approx(2.0, abs=0.01)
+
+
+def test_for_loop_inline_under_transform_parses():
+    """Regression: `rotate(...) for(...) { ... }` (no braces around
+    the for) used to parse as `rotate` with a module-call child named
+    `for`. The MOD_NAME terminal excludes `for` etc. so the parser
+    falls through to the dedicated for_stmt rule."""
+    src = """
+rotate([0, 0, 30])
+for (i = [0:2])
+  translate([i * 5, 0, 0]) cube([1, 1, 1]);
+"""
+    out = _eval(src)
+    me = out["rotate"]
+    # Three unit cubes spread along an axis. Bbox depends on rotation,
+    # but volume sums to 3 cubic units regardless of orientation.
+    from fastcad.model import kernel as k
+    assert k.volume(me.manifold) == pytest.approx(3.0, abs=1e-3)
+
+
 # ---- 2D + extrudes --------------------------------------------------------
 
 
