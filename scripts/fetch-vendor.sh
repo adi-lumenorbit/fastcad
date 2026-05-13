@@ -16,6 +16,10 @@ if [ ! -f "$VENDOR/OrbitControls.js" ]; then
   curl -fsSL -o "$VENDOR/OrbitControls.js" \
     "https://unpkg.com/three@${THREE_VER}/examples/jsm/controls/OrbitControls.js"
 fi
+if [ ! -f "$VENDOR/TransformControls.js" ]; then
+  curl -fsSL -o "$VENDOR/TransformControls.js" \
+    "https://unpkg.com/three@${THREE_VER}/examples/jsm/controls/TransformControls.js"
+fi
 
 # rrweb (recorder only, no replay UI bundled here)
 RRWEB_VER=2.0.0-alpha.13

@@ -4,6 +4,7 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { TransformControls } from "three/addons/controls/TransformControls.js";
 
 // ---------------------------------------------------------------------------
 // Vendor sanity-check: if vendor/ is empty we never reach this file (import
@@ -20,6 +21,10 @@ const canvas = document.getElementById("viewer");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+// Enable per-material clipping planes so the section feature can hide
+// the half of each mesh that's past the cut. Without this the material
+// `clippingPlanes` array is silently ignored.
+renderer.localClippingEnabled = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x202020);
@@ -86,6 +91,157 @@ const meshMaterial = new THREE.MeshStandardMaterial({
 
 // nodeId -> THREE.Mesh
 const meshMap = new Map();
+
+// ---------------------------------------------------------------------------
+// Section plane — interactive X / Y / Z clipping
+// ---------------------------------------------------------------------------
+// One THREE.Plane object is shared between the renderer's clipping
+// pipeline (via the shared mesh material's `clippingPlanes` array)
+// and a TransformControls drag handle. Moving the handle mutates the
+// Plane in place, and three.js re-uses the same Plane reference each
+// frame so geometry re-clips live without a per-frame material
+// rebuild. Color convention matches the AxesHelper: red/green/blue
+// for x/y/z.
+
+const SECTION_AXES = {
+  x: { normal: new THREE.Vector3(-1, 0, 0), color: 0xee5555 },
+  y: { normal: new THREE.Vector3(0, -1, 0), color: 0x55cc55 },
+  z: { normal: new THREE.Vector3(0, 0, -1), color: 0x6699ee },
+};
+
+let sectionAxis = null;
+const sectionPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+
+// clipShadows = true so shadow casters are also clipped — otherwise a
+// half-mesh would still cast a full shadow, giving away the hidden
+// half.
+meshMaterial.clipShadows = true;
+
+// Translucent quad that visualizes the cut. Sized at activation time
+// from the scene bbox. PlaneGeometry's face lives in local XY; we'll
+// rotate the quad so its +Z matches the cut normal.
+const sectionViz = new THREE.Mesh(
+  new THREE.PlaneGeometry(1, 1),
+  new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.18,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  })
+);
+sectionViz.name = "section-plane-viz";
+sectionViz.visible = false;
+scene.add(sectionViz);
+
+// Outline so the plane reads against the dark grid.
+const sectionEdge = new THREE.LineSegments(
+  new THREE.EdgesGeometry(sectionViz.geometry),
+  new THREE.LineBasicMaterial({ color: 0xffffff })
+);
+sectionViz.add(sectionEdge);
+
+// TransformControls: translation-only handle along the active axis.
+// Dragging fires `change`; we re-derive `sectionPlane.constant` from
+// the viz position so the renderer re-clips on the next frame.
+const transformControls = new TransformControls(camera, renderer.domElement);
+transformControls.setMode("translate");
+transformControls.setSize(0.8);
+transformControls.visible = false;
+transformControls.enabled = false;
+scene.add(transformControls);
+transformControls.addEventListener("dragging-changed", (ev) => {
+  // Freeze the camera during a section drag so the two controls don't
+  // fight each other.
+  controls.enabled = !ev.value;
+});
+transformControls.addEventListener("change", () => {
+  if (!sectionAxis) return;
+  sectionPlane.setFromNormalAndCoplanarPoint(
+    sectionPlane.normal,
+    sectionViz.position,
+  );
+});
+
+function sectionSceneBbox() {
+  const box = new THREE.Box3();
+  for (const m of meshMap.values()) box.expandByObject(m);
+  return box.isEmpty() ? null : box;
+}
+
+function setSection(axis) {
+  // Re-clicking the active axis is treated as Off.
+  if (axis === sectionAxis) axis = null;
+  sectionAxis = axis;
+
+  // Sync axis-active CSS on the toolbar.
+  for (const a of ["x", "y", "z"]) {
+    const btn = document.getElementById(`section-${a}-btn`);
+    if (!btn) continue;
+    if (axis === a) {
+      btn.classList.add("section-active");
+      btn.dataset.axis = a;
+    } else {
+      btn.classList.remove("section-active");
+      delete btn.dataset.axis;
+    }
+  }
+
+  if (axis === null) {
+    meshMaterial.clippingPlanes = [];
+    sectionViz.visible = false;
+    transformControls.enabled = false;
+    transformControls.visible = false;
+    transformControls.detach();
+    return;
+  }
+
+  const cfg = SECTION_AXES[axis];
+  sectionPlane.normal.copy(cfg.normal);
+
+  // Position the cut at the scene's bbox midpoint along the chosen
+  // axis. Empty-scene fallback: origin.
+  const bbox = sectionSceneBbox();
+  const mid = new THREE.Vector3();
+  if (bbox) bbox.getCenter(mid);
+  sectionViz.position.copy(mid);
+
+  // Orient the viz so its local +Z matches the cut normal — the
+  // PlaneGeometry face then lies coplanar with the cut.
+  const zHat = new THREE.Vector3(0, 0, 1);
+  sectionViz.quaternion.setFromUnitVectors(zHat, cfg.normal);
+
+  // Size the viz quad to the bbox extent so it's clearly visible
+  // outside the cut geometry. 1.4× margin keeps the outline visible.
+  const size = bbox
+    ? Math.max(
+        bbox.max.x - bbox.min.x,
+        bbox.max.y - bbox.min.y,
+        bbox.max.z - bbox.min.z,
+      ) * 1.4
+    : 100;
+  sectionViz.scale.set(size, size, 1);
+
+  // Recolor viz + outline per axis.
+  sectionViz.material.color.setHex(cfg.color);
+  sectionEdge.material.color.setHex(cfg.color);
+
+  // Bind sectionPlane to the viz position. The renderer reads the
+  // same Plane reference each frame, so further drags update the
+  // clip without re-touching the material.
+  sectionPlane.setFromNormalAndCoplanarPoint(sectionPlane.normal, mid);
+  meshMaterial.clippingPlanes = [sectionPlane];
+
+  // TransformControls: show only the active-axis handle so the user
+  // can't accidentally drag off-plane.
+  transformControls.showX = axis === "x";
+  transformControls.showY = axis === "y";
+  transformControls.showZ = axis === "z";
+  transformControls.attach(sectionViz);
+  transformControls.enabled = true;
+  transformControls.visible = true;
+  sectionViz.visible = true;
+}
 
 function decodeBase64ToBuffer(b64) {
   const bin = atob(b64);
@@ -990,11 +1146,24 @@ document.getElementById("reset-btn").addEventListener("click", () => send({ type
 const homeBtn = document.getElementById("home-btn");
 if (homeBtn) homeBtn.addEventListener("click", recenterCamera);
 
-// Keyboard: 'h' to recenter (when canvas has focus)
+// Keyboard: 'h' to recenter (when canvas has focus). 1/2/3 toggle the
+// X/Y/Z section plane; 0 turns the section off.
 window.addEventListener("keydown", (ev) => {
   if (ev.target instanceof HTMLInputElement) return;  // don't steal chat input
   if (ev.key === "h" || ev.key === "H") recenterCamera();
+  else if (ev.key === "1") setSection("x");
+  else if (ev.key === "2") setSection("y");
+  else if (ev.key === "3") setSection("z");
+  else if (ev.key === "0") setSection(null);
 });
+
+// Section toolbar buttons.
+for (const a of ["x", "y", "z"]) {
+  const btn = document.getElementById(`section-${a}-btn`);
+  if (btn) btn.addEventListener("click", () => setSection(a));
+}
+const sectionOffBtn = document.getElementById("section-off-btn");
+if (sectionOffBtn) sectionOffBtn.addEventListener("click", () => setSection(null));
 
 // ---------------------------------------------------------------------------
 // Hooks for feedback.js + e2e tests
@@ -1013,4 +1182,13 @@ window.fastcad.cameraState = () => ({
   position: camera.position.toArray(),
   target: controls.target.toArray(),
   up: camera.up.toArray(),
+});
+// Section plane introspection for tests.
+window.fastcad.setSection = setSection;
+window.fastcad.sectionState = () => ({
+  axis: sectionAxis,
+  clippingPlaneCount: (meshMaterial.clippingPlanes || []).length,
+  vizVisible: sectionViz.visible,
+  planeConstant: sectionPlane.constant,
+  planeNormal: sectionPlane.normal.toArray(),
 });

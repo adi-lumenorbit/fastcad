@@ -9,7 +9,8 @@
   {
     "imports": {
       "three": "/vendor/three.module.js",
-      "three/addons/controls/OrbitControls.js": "/vendor/OrbitControls.js"
+      "three/addons/controls/OrbitControls.js": "/vendor/OrbitControls.js",
+      "three/addons/controls/TransformControls.js": "/vendor/TransformControls.js"
     }
   }
   </script>
@@ -26,6 +27,16 @@
         <button id="home-btn" data-testid="home-btn" type="button" title="Recenter view (h)">Home</button>
         <button id="export-btn" data-testid="export-btn" type="button">Export .scad</button>
         <button id="reset-btn" data-testid="reset-btn" type="button" title="Clear scene">Reset</button>
+        <span class="overlay-group" data-testid="section-group">
+          <button id="section-x-btn" data-testid="section-x-btn" type="button"
+                  title="Cut X (key: 1)">Cut X</button>
+          <button id="section-y-btn" data-testid="section-y-btn" type="button"
+                  title="Cut Y (key: 2)">Cut Y</button>
+          <button id="section-z-btn" data-testid="section-z-btn" type="button"
+                  title="Cut Z (key: 3)">Cut Z</button>
+          <button id="section-off-btn" data-testid="section-off-btn" type="button"
+                  title="Section off (key: 0)">Off</button>
+        </span>
       </div>
       <div id="viewer-help" data-testid="viewer-help">
         <span><b>L-drag</b> rotate</span>
