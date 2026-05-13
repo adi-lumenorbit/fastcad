@@ -30,10 +30,25 @@ def sphere(radius: float, segments: int = 32) -> Manifold:
     return _m.Manifold.sphere(float(radius), int(segments))
 
 
-def cylinder(height: float, radius: float, segments: int = 32, center: bool = False) -> Manifold:
-    if height <= 0 or radius <= 0:
-        raise ValueError(f"cylinder needs positive height and radius, got {height!r}, {radius!r}")
-    return _m.Manifold.cylinder(float(height), float(radius), -1.0, int(segments), center)
+def cylinder(
+    height: float,
+    radius: float,
+    segments: int = 32,
+    center: bool = False,
+    radius_top: float | None = None,
+) -> Manifold:
+    """Cylinder or truncated cone. `radius` is the bottom radius;
+    `radius_top` overrides the top radius for cone / frustum shapes
+    (OpenSCAD's `r1` / `r2`). Either radius may be zero (apex), but
+    not both."""
+    if height <= 0:
+        raise ValueError(f"cylinder needs positive height, got {height!r}")
+    top = radius if radius_top is None else float(radius_top)
+    if radius < 0 or top < 0:
+        raise ValueError(f"cylinder radii must be non-negative, got {radius!r}, {top!r}")
+    if radius == 0 and top == 0:
+        raise ValueError("cylinder needs at least one positive radius")
+    return _m.Manifold.cylinder(float(height), float(radius), float(top), int(segments), center)
 
 
 def translate(m: Manifold, offset: Sequence[float]) -> Manifold:
@@ -89,11 +104,17 @@ def extrude_polygon(
     if height <= 0:
         raise ValueError(f"extrude height must be positive, got {height!r}")
     cs = _to_cross_section(polygons)
+    # OpenSCAD twists clockwise looking from below toward +Z (positive
+    # twist rotates the bottom edge to the right). manifold3d's
+    # extrude rotates the other way — empirically the X/Y bboxes of
+    # a non-symmetric twisted section come out mirrored. Negate the
+    # angle here so the .scad-spec semantics match what the user sees
+    # in OpenSCAD's viewer.
     return _m.Manifold.extrude(
         cs,
         float(height),
         int(n_divisions),
-        float(twist_deg),
+        -float(twist_deg),
         (float(scale_top[0]), float(scale_top[1])),
     )
 
