@@ -43,6 +43,29 @@ def test_open_scad_loads_fixture_and_undo_restores(live_server: str, page) -> No
     page.wait_for_function("window.fastcad.meshMap.size === 0", timeout=5000)
 
 
+def test_open_scad_handles_path_with_spaces(live_server: str, page) -> None:
+    """Regression: a fixture path with spaces in the filename.
+    Reported as not working from the UI even though the server
+    handled it correctly when probed directly — flags a client-side
+    bug in how the path is captured / sent / awaited."""
+    page.goto(live_server + "/")
+    page.wait_for_function("window.fastcad && window.fastcad.ready === true")
+
+    page.click("[data-testid=open-btn]")
+    page.wait_for_function(
+        "document.querySelector('[data-testid=open-dialog]').open === true"
+    )
+
+    spaced_path = str(_FIXTURES / "cube with spaces.scad")
+    page.fill("[data-testid=open-path-input]", spaced_path)
+    page.click("[data-testid=open-confirm-btn]")
+
+    page.wait_for_function("window.fastcad.meshMap.size === 1", timeout=5000)
+    page.wait_for_function(
+        "document.querySelector('[data-testid=open-dialog]').open === false"
+    )
+
+
 def test_open_scad_invalid_path_shows_inline_error(live_server: str, page) -> None:
     page.goto(live_server + "/")
     page.wait_for_function("window.fastcad && window.fastcad.ready === true")
