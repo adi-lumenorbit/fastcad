@@ -560,22 +560,40 @@ def _builtin_sphere(call: ModuleCall, env: Env) -> Geometry:
 
 
 def _builtin_cylinder(call: ModuleCall, env: Env) -> Geometry:
+    """OpenSCAD's `cylinder(h, r | r1, r2 | d | d1, d2, center, $fn)`.
+
+    Three radius forms:
+      - `r` (or `d`): same radius at both ends — straight cylinder.
+      - `r1` + `r2` (or `d1` + `d2`): per-end radii — frustum / cone.
+      - Positional: `cylinder(h, r)` or `cylinder(h, r1, r2)`.
+    """
     args = _resolve_args(call, env)
     height = _to_num(args.get("h", args.get(0, 1)), "cylinder h")
-    if "r" in args:
-        radius = _to_num(args["r"], "cylinder r")
+
+    has_split = any(k_ in args for k_ in ("r1", "r2", "d1", "d2")) or 2 in args
+    if has_split:
+        r1 = (
+            _to_num(args["r1"], "cylinder r1") if "r1" in args
+            else _to_num(args["d1"], "cylinder d1") / 2.0 if "d1" in args
+            else _to_num(args.get(1, 1), "cylinder r1")
+        )
+        r2 = (
+            _to_num(args["r2"], "cylinder r2") if "r2" in args
+            else _to_num(args["d2"], "cylinder d2") / 2.0 if "d2" in args
+            else _to_num(args.get(2, 1), "cylinder r2")
+        )
+    elif "r" in args:
+        r1 = r2 = _to_num(args["r"], "cylinder r")
     elif "d" in args:
-        radius = _to_num(args["d"], "cylinder d") / 2.0
-    elif "r1" in args or "r2" in args:
-        # Conic; simplification: use min of r1, r2 (manifold3d.cylinder
-        # supports tapers via -1 default; we'd need the underlying call).
-        # Defer cone support to a follow-up; for now use r1 as the radius.
-        radius = _to_num(args.get("r1", args.get("r2", 1)), "cylinder r1/r2")
+        r1 = r2 = _to_num(args["d"], "cylinder d") / 2.0
     else:
-        radius = _to_num(args.get(1, 1), "cylinder r")
+        r1 = r2 = _to_num(args.get(1, 1), "cylinder r")
+
     segments = int(_to_num(args.get("$fn", env.vars.get("$fn", 32))))
     center = bool(args.get("center", False))
-    return k.cylinder(height, radius, segments=max(3, segments), center=center)
+    return k.cylinder(
+        height, r1, segments=max(3, segments), center=center, radius_top=r2,
+    )
 
 
 def _builtin_circle(call: ModuleCall, env: Env) -> Geometry:
@@ -635,24 +653,49 @@ def _builtin_polyhedron(call: ModuleCall, env: Env) -> Geometry:
 
 # Transforms accept a single child or a block.
 def _builtin_translate(call: ModuleCall, env: Env) -> Geometry:
+    """OpenSCAD's `translate(v)`. `v` is a 2-vector for 2D children
+    (the implicit z-component is 0) or a 3-vector for 3D. We accept
+    both shapes so 2D pipelines (`translate([x,y]) circle(...)`)
+    work without forcing the user to pad with a zero."""
     args = _resolve_args(call, env)
     v = args.get("v", args.get(0))
-    if not (isinstance(v, tuple) and len(v) == 3):
-        raise EvalError("translate requires a 3-vector")
+    if not (isinstance(v, tuple) and len(v) in (2, 3)):
+        raise EvalError("translate requires a 2- or 3-vector")
+    x = _to_num(v[0])
+    y = _to_num(v[1])
+    z = _to_num(v[2]) if len(v) == 3 else 0.0
     child = eval_stmts(call.children, env)
-    return _apply_translate(child, (_to_num(v[0]), _to_num(v[1]), _to_num(v[2])))
+    return _apply_translate(child, (x, y, z))
 
 
 def _builtin_rotate(call: ModuleCall, env: Env) -> Geometry:
+    # OpenSCAD's three rotate forms:
+    #   rotate([rx, ry, rz])         - XYZ Euler angles in degrees
+    #   rotate(angle)                - shortcut for [0, 0, angle]
+    #   rotate(angle, [vx, vy, vz])  - angle-around-axis (Rodrigues)
     args = _resolve_args(call, env)
     a = args.get("a", args.get(0))
-    if isinstance(a, tuple) and len(a) == 3:
-        rot = (_to_num(a[0]), _to_num(a[1]), _to_num(a[2]))
-    else:
-        # rotate(angle) → angle around Z
-        rot = (0.0, 0.0, _to_num(a, "rotate angle"))
+    v = args.get("v", args.get(1))
     child = eval_stmts(call.children, env)
-    return _apply_rotate(child, rot)
+
+    if isinstance(a, tuple) and len(a) == 3:
+        # Vector form: Euler XYZ.
+        rot = (_to_num(a[0]), _to_num(a[1]), _to_num(a[2]))
+        return _apply_rotate(child, rot)
+
+    angle_deg = _to_num(a, "rotate angle")
+    if v is None:
+        # Scalar-only form → rotate around Z.
+        return _apply_rotate(child, (0.0, 0.0, angle_deg))
+
+    # Axis-angle form. The axis is a 3-vector; build a Rodrigues
+    # rotation matrix and apply via `transform()` so the result
+    # matches OpenSCAD exactly for any axis (not just the cardinal
+    # ones, which would also work via the Euler shortcut).
+    if not (isinstance(v, tuple) and len(v) == 3):
+        raise EvalError("rotate axis must be a 3-vector")
+    axis = (_to_num(v[0]), _to_num(v[1]), _to_num(v[2]))
+    return _apply_rotate_axis_angle(child, angle_deg, axis)
 
 
 def _builtin_scale(call: ModuleCall, env: Env) -> Geometry:
@@ -831,6 +874,46 @@ def _apply_rotate(g, rot_xyz_deg: tuple[float, float, float]):
         # Only Z rotation is meaningful for 2D.
         return g.rotate(rot_xyz_deg[2])
     return g.rotate(list(rot_xyz_deg))
+
+
+def _apply_rotate_axis_angle(g, angle_deg: float, axis: tuple[float, float, float]):
+    """Rotate by `angle_deg` around the arbitrary axis `axis`
+    (OpenSCAD's `rotate(a, v)` form). Implemented via Rodrigues'
+    formula → 3x4 affine matrix → `manifold.transform()`.
+    For 2D geometry, only axes along ±Z are meaningful; other axes
+    would lift the polygon out of the XY plane and we reject them.
+    """
+    if g is None:
+        return None
+    ax, ay, az = axis
+    norm = math.sqrt(ax * ax + ay * ay + az * az)
+    if norm < 1e-12:
+        return g  # zero axis → identity rotation (matches OpenSCAD)
+    ax, ay, az = ax / norm, ay / norm, az / norm
+
+    if _is_2d(g):
+        if abs(ax) > 1e-9 or abs(ay) > 1e-9:
+            raise EvalError(
+                "rotate(angle, axis) on 2D geometry only supports a "
+                "Z-aligned axis"
+            )
+        # Z axis only — sign determined by the axis direction.
+        return g.rotate(math.copysign(angle_deg, az) if az != 0 else 0.0)
+
+    a = math.radians(angle_deg)
+    c = math.cos(a)
+    s = math.sin(a)
+    t = 1.0 - c
+    # Rodrigues' rotation matrix (column-major-friendly 3x3, packed
+    # row-by-row here; manifold3d's transform() takes a 3x4 matrix:
+    # the first three columns are the 3x3 rotation/scale/shear, the
+    # last column is the translation. No translation here.)
+    m = [
+        [t * ax * ax + c,      t * ax * ay - s * az, t * ax * az + s * ay, 0.0],
+        [t * ax * ay + s * az, t * ay * ay + c,      t * ay * az - s * ax, 0.0],
+        [t * ax * az - s * ay, t * ay * az + s * ax, t * az * az + c,      0.0],
+    ]
+    return g.transform(m)
 
 
 def _apply_scale(g, s: tuple[float, float, float]):
