@@ -18,7 +18,16 @@ window.fastcad.ready = false;
 // ---------------------------------------------------------------------------
 
 const canvas = document.getElementById("viewer");
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+// `stencil: true` is REQUIRED for the section-cap pipeline — three.js
+// 0.162 defaults it to false, which silently no-ops every stencil
+// write/test and makes the cap quad render unmasked over the whole
+// viewport instead of filling only the cross-sections.
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  preserveDrawingBuffer: true,
+  stencil: true,
+});
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
 // Enable per-material clipping planes so the section feature can hide
@@ -148,15 +157,20 @@ const SECTION_AXES = {
 let sectionAxis = null;
 const sectionPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
 
-// Translucent quad that visualizes the cut. Sized at activation time
-// from the scene bbox. PlaneGeometry's face lives in local XY; we'll
-// rotate the quad so its +Z matches the cut normal.
+// Anchor for the cut plane: a PlaneGeometry mesh with no visible
+// fragments (colorWrite/depthWrite off) — its only roles are
+// (1) carrying the position/orientation that the per-mesh cap quads
+//     copy from each frame, and
+// (2) being the target object TransformControls attaches to.
+// A previous version painted this as a 18%-opaque green tint, which
+// rendered in the transparent pass AFTER all opaque (including the
+// stencil cap), hiding the caps behind a flat fill. Now the cut is
+// communicated by (a) the cap fills inside cut solids, (b) the
+// edge outline below, and (c) the TransformControls arrow.
 const sectionViz = new THREE.Mesh(
   new THREE.PlaneGeometry(1, 1),
   new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    opacity: 0.18,
+    colorWrite: false,
     depthWrite: false,
     side: THREE.DoubleSide,
   })
@@ -165,7 +179,9 @@ sectionViz.name = "section-plane-viz";
 sectionViz.visible = false;
 scene.add(sectionViz);
 
-// Outline so the plane reads against the dark grid.
+// Outline of the cut plane: a white rectangle along the bbox edges
+// so the user has a visual frame for the cut location even where no
+// geometry happens to intersect the plane.
 const sectionEdge = new THREE.LineSegments(
   new THREE.EdgesGeometry(sectionViz.geometry),
   new THREE.LineBasicMaterial({ color: 0xffffff })
@@ -220,130 +236,134 @@ transformControls.addEventListener("change", () => {
 // follow-up issue. Until then, this stencil approach is the smallest
 // way to satisfy the visual need.
 
-const stencilBackMat = new THREE.MeshBasicMaterial({
-  side: THREE.BackSide,
-  colorWrite: false,
-  depthWrite: false,
-  stencilWrite: true,
-  stencilFunc: THREE.AlwaysStencilFunc,
-  stencilFail: THREE.IncrementWrapStencilOp,
-  stencilZFail: THREE.IncrementWrapStencilOp,
-  stencilZPass: THREE.IncrementWrapStencilOp,
-  clippingPlanes: [sectionPlane],
-  clipShadows: true,
-});
-const stencilFrontMat = new THREE.MeshBasicMaterial({
-  side: THREE.FrontSide,
-  colorWrite: false,
-  depthWrite: false,
-  stencilWrite: true,
-  stencilFunc: THREE.AlwaysStencilFunc,
-  stencilFail: THREE.DecrementWrapStencilOp,
-  stencilZFail: THREE.DecrementWrapStencilOp,
-  stencilZPass: THREE.DecrementWrapStencilOp,
-  clippingPlanes: [sectionPlane],
-  clipShadows: true,
-});
+// Settings come from the official three.js stencil-clipping example
+// (examples/webgl_clipping_stencil.html). Critically: depthTest is
+// off so the stencil pass writes to stencil regardless of what's in
+// the depth buffer from previous passes.
+// Settings come from the official three.js stencil-clipping example.
+// Each user mesh gets its own pair of shadow meshes (back-face
+// increment, front-face decrement) sharing the geometry. They render
+// before the cap and before the regular geometry via renderOrder, so
+// no multi-pass logic is needed — one renderer.render() call handles
+// the whole pipeline.
+function makeStencilBackMaterial() {
+  return new THREE.MeshBasicMaterial({
+    side: THREE.BackSide,
+    colorWrite: false,
+    depthWrite: false,
+    stencilWrite: true,
+    stencilFunc: THREE.AlwaysStencilFunc,
+    stencilFail: THREE.IncrementWrapStencilOp,
+    stencilZFail: THREE.IncrementWrapStencilOp,
+    stencilZPass: THREE.IncrementWrapStencilOp,
+    clippingPlanes: [sectionPlane],
+    clipShadows: true,
+  });
+}
+function makeStencilFrontMaterial() {
+  return new THREE.MeshBasicMaterial({
+    side: THREE.FrontSide,
+    colorWrite: false,
+    depthWrite: false,
+    stencilWrite: true,
+    stencilFunc: THREE.AlwaysStencilFunc,
+    stencilFail: THREE.DecrementWrapStencilOp,
+    stencilZFail: THREE.DecrementWrapStencilOp,
+    stencilZPass: THREE.DecrementWrapStencilOp,
+    clippingPlanes: [sectionPlane],
+    clipShadows: true,
+  });
+}
 
-// Cap quad: rendered only where stencil != 0. depthWrite=false so it
-// doesn't occlude the kept geometry in the final color pass.
-const capQuad = new THREE.Mesh(
-  new THREE.PlaneGeometry(1, 1),
-  new THREE.MeshBasicMaterial({
-    color: 0xffffff,
+// Cap quad: rendered only where stencil != 0 (i.e. ray currently
+// inside a cut solid's silhouette). The Replace ops reset stencil
+// back to 0 after the cap renders, so the next solid's stencil pair
+// starts clean without an explicit clear call between solids.
+function makeCapMaterial(color = 0xffffff) {
+  return new THREE.MeshBasicMaterial({
+    color,
     side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 0.92,
     stencilWrite: true,
     stencilRef: 0,
     stencilFunc: THREE.NotEqualStencilFunc,
-    stencilFail: THREE.KeepStencilOp,
-    stencilZFail: THREE.KeepStencilOp,
-    stencilZPass: THREE.KeepStencilOp,
-    depthWrite: false,
-  }),
-);
-capQuad.name = "section-cap-quad";
-capQuad.frustumCulled = false;
+    stencilFail: THREE.ReplaceStencilOp,
+    stencilZFail: THREE.ReplaceStencilOp,
+    stencilZPass: THREE.ReplaceStencilOp,
+  });
+}
 
-// The cap quad rides in its own scene so the final color pass doesn't
-// re-render it. (Mirrors capScene = scene approach but isolates cap
-// rendering to one draw call per mesh per frame.)
-const capScene = new THREE.Scene();
+// Per-user-mesh section bundle: a back-face + front-face stencil
+// shadow plus a dedicated cap quad. Both shadow meshes share the user
+// mesh's geometry (cheap — no clone). The cap quad is a unit
+// PlaneGeometry that gets transformed each frame to ride the cut
+// plane. With renderOrder set explicitly, one renderer.render call
+// handles the whole stencil+cap+color pipeline.
+//
+// renderOrder layout for the i'th user mesh:
+//   i*3     — stencil back  (writes stencil)
+//   i*3 + 1 — stencil front (writes stencil)
+//   i*3 + 2 — cap quad      (renders where stencil != 0, resets
+//                            stencil to 0 via ReplaceStencilOp so the
+//                            next solid starts clean)
+//   N*3 + i — user mesh color (renders last)
+const sectionBundles = new Map();  // nodeId -> { back, front, cap }
 
-// Helpers that must be hidden during stencil/cap passes so they don't
-// pollute the color buffer. Lights stay in `scene` but they don't
-// write fragments so they're safe to leave.
-const sectionHelperHideList = [grid, axesHelper, sectionViz, transformControls];
+function buildSectionBundle(userMesh) {
+  const back = new THREE.Mesh(userMesh.geometry, makeStencilBackMaterial());
+  const front = new THREE.Mesh(userMesh.geometry, makeStencilFrontMaterial());
+  // The shadow meshes share the user mesh's geometry but live as
+  // separate scene nodes; reparenting under userMesh would inherit
+  // the world matrix automatically, which is the cleanest sync path.
+  userMesh.add(back);
+  userMesh.add(front);
+  const cap = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), makeCapMaterial());
+  cap.name = `section-cap-${userMesh.userData.id}`;
+  cap.frustumCulled = false;
+  scene.add(cap);
+  return { back, front, cap };
+}
 
-function renderSectionWithCaps() {
-  const meshes = [...meshMap.values()];
-  if (meshes.length === 0) {
-    renderer.render(scene, camera);
+function teardownSectionBundle(bundle) {
+  bundle.back.parent?.remove(bundle.back);
+  bundle.front.parent?.remove(bundle.front);
+  scene.remove(bundle.cap);
+  bundle.back.material.dispose();
+  bundle.front.material.dispose();
+  bundle.cap.material.dispose();
+  bundle.cap.geometry.dispose();
+}
+
+function refreshSectionBundles() {
+  // Tear down whatever's there.
+  for (const b of sectionBundles.values()) teardownSectionBundle(b);
+  sectionBundles.clear();
+  if (sectionAxis === null) {
+    for (const m of meshMap.values()) m.renderOrder = 0;
     return;
   }
-
-  // Lock the cap quad to the visualization plane every frame; the
-  // user may have dragged the gizmo since the last frame.
-  capQuad.position.copy(sectionViz.position);
-  capQuad.quaternion.copy(sectionViz.quaternion);
-  capQuad.scale.copy(sectionViz.scale);
-  capQuad.material.color.setHex(SECTION_AXES[sectionAxis].color);
-  capScene.children.length = 0;
-  capScene.add(capQuad);
-
-  renderer.autoClear = false;
-  renderer.clear(true, true, true);  // color + depth + stencil
-
-  // Stash original visibility on user meshes + helpers so we can
-  // toggle and restore.
-  const savedMeshVis = meshes.map((m) => m.visible);
-  const savedHelperVis = sectionHelperHideList.map((h) => h.visible);
-  for (const h of sectionHelperHideList) h.visible = false;
-
-  for (let i = 0; i < meshes.length; i++) {
-    const target = meshes[i];
-    if (!savedMeshVis[i]) continue;  // user hid this mesh; skip
-    const realMat = target.material;
-
-    // Only the target mesh contributes to this stencil/cap iteration.
-    for (let j = 0; j < meshes.length; j++) {
-      meshes[j].visible = j === i && savedMeshVis[j];
-    }
-
-    renderer.clearStencil();
-
-    // Back faces: stencil increment.
-    target.material = stencilBackMat;
-    renderer.render(scene, camera);
-
-    // Front faces: stencil decrement.
-    target.material = stencilFrontMat;
-    renderer.render(scene, camera);
-
-    // Restore the real material now (the final color pass will see it).
-    target.material = realMat;
-
-    // Cap pass: render the cap quad in its own scene, masked by the
-    // stencil we just built.
-    renderer.render(capScene, camera);
+  const userMeshes = [...meshMap.values()];
+  const N = userMeshes.length;
+  const axisColor = SECTION_AXES[sectionAxis].color;
+  for (let i = 0; i < N; i++) {
+    const m = userMeshes[i];
+    const bundle = buildSectionBundle(m);
+    bundle.back.renderOrder = i * 3;
+    bundle.front.renderOrder = i * 3 + 1;
+    bundle.cap.renderOrder = i * 3 + 2;
+    bundle.cap.material.color.setHex(axisColor);
+    sectionBundles.set(m.userData.id, bundle);
+    m.renderOrder = N * 3 + i;
   }
+}
 
-  // Restore everything before the final pass.
-  for (let i = 0; i < meshes.length; i++) meshes[i].visible = savedMeshVis[i];
-  for (let k = 0; k < sectionHelperHideList.length; k++) {
-    sectionHelperHideList[k].visible = savedHelperVis[k];
+function updateSectionCapTransforms() {
+  // Each frame, sync every cap quad to the visualization plane so
+  // the cap moves live as the user drags the gizmo.
+  for (const bundle of sectionBundles.values()) {
+    bundle.cap.position.copy(sectionViz.position);
+    bundle.cap.quaternion.copy(sectionViz.quaternion);
+    bundle.cap.scale.copy(sectionViz.scale);
   }
-
-  // Final color pass with clipping. We need to clear depth+stencil
-  // so the kept geometry isn't depth-shadowed by leftover values
-  // from the stencil passes (those had depthWrite off, but the cap
-  // quad's depth lives in the buffer too).
-  renderer.clearDepth();
-  renderer.clearStencil();
-  renderer.render(scene, camera);
-
-  renderer.autoClear = true;
 }
 
 function sectionSceneBbox() {
@@ -372,6 +392,7 @@ function setSection(axis) {
 
   if (axis === null) {
     for (const mesh of meshMap.values()) applyCurrentSectionTo(mesh.material);
+    refreshSectionBundles();
     sectionViz.visible = false;
     transformControls.enabled = false;
     transformControls.visible = false;
@@ -414,6 +435,10 @@ function setSection(axis) {
   // clip without re-touching the material.
   sectionPlane.setFromNormalAndCoplanarPoint(sectionPlane.normal, mid);
   for (const mesh of meshMap.values()) applyCurrentSectionTo(mesh.material);
+
+  // Build the per-mesh stencil + cap bundles, set renderOrder so the
+  // stencil and cap passes happen before the regular color pass.
+  refreshSectionBundles();
 
   // TransformControls: show only the active-axis handle so the user
   // can't accidentally drag off-plane.
@@ -480,12 +505,14 @@ function clearAllNodes() {
 function applySceneInit(payload) {
   clearAllNodes();
   for (const node of payload.nodes) applyNodeUpdate(node);
+  if (sectionAxis !== null) refreshSectionBundles();
 }
 
 function applySceneDelta(payload) {
   for (const node of payload.added || []) applyNodeUpdate(node);
   for (const node of payload.updated || []) applyNodeUpdate(node);
   for (const id of payload.removed || []) removeNode(id);
+  if (sectionAxis !== null) refreshSectionBundles();
 }
 
 // ---------------------------------------------------------------------------
@@ -516,10 +543,11 @@ function frame() {
   resize();
   controls.update();
   if (sectionAxis !== null) {
-    renderSectionWithCaps();
-  } else {
-    renderer.render(scene, camera);
+    // Section bundles ride the visualization plane; update each frame
+    // so the cap follows the drag handle.
+    updateSectionCapTransforms();
   }
+  renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
 frame();
@@ -1378,7 +1406,7 @@ window.fastcad.cameraState = () => ({
 });
 // Section plane introspection for tests.
 window.fastcad.setSection = setSection;
-window.fastcad.capQuad = capQuad;
+window.fastcad.sectionBundles = sectionBundles;
 window.fastcad.colorForId = colorForId;
 window.fastcad.sectionState = () => {
   // Every per-mesh material gets the same clipping plane setup, so
@@ -1386,11 +1414,16 @@ window.fastcad.sectionState = () => {
   // "is clipping currently active". Empty scene → 0.
   const first = meshMap.values().next().value;
   const planes = first ? (first.material.clippingPlanes || []) : [];
+  // Pick any one bundle for color introspection — caps share the
+  // axis tint, so any of them tells you the active axis color.
+  const anyBundle = sectionBundles.values().next().value;
   return {
     axis: sectionAxis,
     clippingPlaneCount: planes.length,
     vizVisible: sectionViz.visible,
     planeConstant: sectionPlane.constant,
     planeNormal: sectionPlane.normal.toArray(),
+    bundleCount: sectionBundles.size,
+    capColor: anyBundle ? anyBundle.cap.material.color.getHex() : null,
   };
 };
