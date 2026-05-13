@@ -18,7 +18,16 @@ window.fastcad.ready = false;
 // ---------------------------------------------------------------------------
 
 const canvas = document.getElementById("viewer");
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+// `stencil: true` is REQUIRED for the section-cap pipeline — three.js
+// 0.162 defaults it to false, which silently no-ops every stencil
+// write/test and makes the cap quad render unmasked over the whole
+// viewport instead of filling only the cross-sections.
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  preserveDrawingBuffer: true,
+  stencil: true,
+});
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
 // Enable per-material clipping planes so the section feature can hide
@@ -72,7 +81,9 @@ dir.position.set(60, -60, 100);
 scene.add(dir);
 
 // Reference grid + axes
-scene.add(new THREE.AxesHelper(20));
+const axesHelper = new THREE.AxesHelper(20);
+axesHelper.name = "axes-helper";
+scene.add(axesHelper);
 const grid = new THREE.GridHelper(200, 20, 0x444444, 0x333333);
 grid.rotation.x = Math.PI / 2;
 scene.add(grid);
@@ -82,12 +93,46 @@ scene.add(grid);
 // thread teeth read as faceted teeth instead of being smoothed into a
 // continuous spiral that looks like dust. Curved surfaces look slightly
 // faceted but $fn=64 makes that nearly invisible.
-const meshMaterial = new THREE.MeshStandardMaterial({
-  color: 0xc9c1a8,
-  metalness: 0.05,
-  roughness: 0.65,
-  flatShading: true,
-});
+//
+// Each mesh gets its own material so colors can differ per node. The
+// color is a deterministic FNV-1a hash of `node.id` mapped to an HSL
+// hue with muted CAD-friendly saturation/lightness — same id always
+// renders in the same color across sessions, and adjacent nodes are
+// almost always distinguishable.
+function colorForId(id) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  const hue = ((h >>> 0) % 360) / 360;
+  return new THREE.Color().setHSL(hue, 0.4, 0.55);
+}
+
+function makeMeshMaterial(id) {
+  const material = new THREE.MeshStandardMaterial({
+    color: colorForId(id),
+    metalness: 0.05,
+    roughness: 0.65,
+    flatShading: true,
+  });
+  // clipShadows = true so shadow casters are also clipped — otherwise
+  // a half-mesh would still cast a full shadow, giving away the half
+  // the section hides.
+  material.clipShadows = true;
+  // Inherit the currently-active section (if any) so meshes added
+  // after section activation clip the same way as the pre-existing
+  // ones. Updated in lockstep by `setSection`.
+  applyCurrentSectionTo(material);
+  return material;
+}
+
+// Set the clipping planes on a freshly-built material to match the
+// section state. Pulled out so `setSection` and `makeMeshMaterial`
+// can both call it without duplicating policy.
+function applyCurrentSectionTo(material) {
+  material.clippingPlanes = sectionAxis === null ? [] : [sectionPlane];
+}
 
 // nodeId -> THREE.Mesh
 const meshMap = new Map();
@@ -112,20 +157,20 @@ const SECTION_AXES = {
 let sectionAxis = null;
 const sectionPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
 
-// clipShadows = true so shadow casters are also clipped — otherwise a
-// half-mesh would still cast a full shadow, giving away the hidden
-// half.
-meshMaterial.clipShadows = true;
-
-// Translucent quad that visualizes the cut. Sized at activation time
-// from the scene bbox. PlaneGeometry's face lives in local XY; we'll
-// rotate the quad so its +Z matches the cut normal.
+// Anchor for the cut plane: a PlaneGeometry mesh with no visible
+// fragments (colorWrite/depthWrite off) — its only roles are
+// (1) carrying the position/orientation that the per-mesh cap quads
+//     copy from each frame, and
+// (2) being the target object TransformControls attaches to.
+// A previous version painted this as a 18%-opaque green tint, which
+// rendered in the transparent pass AFTER all opaque (including the
+// stencil cap), hiding the caps behind a flat fill. Now the cut is
+// communicated by (a) the cap fills inside cut solids, (b) the
+// edge outline below, and (c) the TransformControls arrow.
 const sectionViz = new THREE.Mesh(
   new THREE.PlaneGeometry(1, 1),
   new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    opacity: 0.18,
+    colorWrite: false,
     depthWrite: false,
     side: THREE.DoubleSide,
   })
@@ -134,7 +179,9 @@ sectionViz.name = "section-plane-viz";
 sectionViz.visible = false;
 scene.add(sectionViz);
 
-// Outline so the plane reads against the dark grid.
+// Outline of the cut plane: a white rectangle along the bbox edges
+// so the user has a visual frame for the cut location even where no
+// geometry happens to intersect the plane.
 const sectionEdge = new THREE.LineSegments(
   new THREE.EdgesGeometry(sectionViz.geometry),
   new THREE.LineBasicMaterial({ color: 0xffffff })
@@ -163,6 +210,162 @@ transformControls.addEventListener("change", () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// Stencil-buffer section caps
+// ---------------------------------------------------------------------------
+// When the section plane is active, each cut solid normally renders as
+// an empty shell (you see straight through to the back of the same
+// mesh). To make cuts read as solid CAD-style cross-sections, we run a
+// per-mesh stencil/cap pass before the final color pass:
+//
+//   For each mesh:
+//     1) clear stencil
+//     2) render back-faces with stencil += 1 (color/depth writes off)
+//     3) render front-faces with stencil -= 1 (color/depth writes off)
+//        — after these two passes, stencil != 0 exactly where the
+//          camera ray is currently inside this solid (between an
+//          unmatched entry and exit), which is exactly the
+//          cross-section region we want to fill
+//     4) render a single bbox-scale cap quad, masked by stencil != 0,
+//        in the axis tint color
+//   Then a final pass renders the regular clipped geometry on top.
+//
+// Long-term, this should be replaced by real-mesh capping computed
+// from `manifold3d-wasm` in a worker — the cap would then be a first-
+// class scene node that can be exported / picked / measured. See
+// follow-up issue. Until then, this stencil approach is the smallest
+// way to satisfy the visual need.
+
+// Settings come from the official three.js stencil-clipping example
+// (examples/webgl_clipping_stencil.html). Critically: depthTest is
+// off so the stencil pass writes to stencil regardless of what's in
+// the depth buffer from previous passes.
+// Settings come from the official three.js stencil-clipping example.
+// Each user mesh gets its own pair of shadow meshes (back-face
+// increment, front-face decrement) sharing the geometry. They render
+// before the cap and before the regular geometry via renderOrder, so
+// no multi-pass logic is needed — one renderer.render() call handles
+// the whole pipeline.
+function makeStencilBackMaterial() {
+  return new THREE.MeshBasicMaterial({
+    side: THREE.BackSide,
+    colorWrite: false,
+    depthWrite: false,
+    stencilWrite: true,
+    stencilFunc: THREE.AlwaysStencilFunc,
+    stencilFail: THREE.IncrementWrapStencilOp,
+    stencilZFail: THREE.IncrementWrapStencilOp,
+    stencilZPass: THREE.IncrementWrapStencilOp,
+    clippingPlanes: [sectionPlane],
+    clipShadows: true,
+  });
+}
+function makeStencilFrontMaterial() {
+  return new THREE.MeshBasicMaterial({
+    side: THREE.FrontSide,
+    colorWrite: false,
+    depthWrite: false,
+    stencilWrite: true,
+    stencilFunc: THREE.AlwaysStencilFunc,
+    stencilFail: THREE.DecrementWrapStencilOp,
+    stencilZFail: THREE.DecrementWrapStencilOp,
+    stencilZPass: THREE.DecrementWrapStencilOp,
+    clippingPlanes: [sectionPlane],
+    clipShadows: true,
+  });
+}
+
+// Cap quad: rendered only where stencil != 0 (i.e. ray currently
+// inside a cut solid's silhouette). The Replace ops reset stencil
+// back to 0 after the cap renders, so the next solid's stencil pair
+// starts clean without an explicit clear call between solids.
+function makeCapMaterial(color = 0xffffff) {
+  return new THREE.MeshBasicMaterial({
+    color,
+    side: THREE.DoubleSide,
+    stencilWrite: true,
+    stencilRef: 0,
+    stencilFunc: THREE.NotEqualStencilFunc,
+    stencilFail: THREE.ReplaceStencilOp,
+    stencilZFail: THREE.ReplaceStencilOp,
+    stencilZPass: THREE.ReplaceStencilOp,
+  });
+}
+
+// Per-user-mesh section bundle: a back-face + front-face stencil
+// shadow plus a dedicated cap quad. Both shadow meshes share the user
+// mesh's geometry (cheap — no clone). The cap quad is a unit
+// PlaneGeometry that gets transformed each frame to ride the cut
+// plane. With renderOrder set explicitly, one renderer.render call
+// handles the whole stencil+cap+color pipeline.
+//
+// renderOrder layout for the i'th user mesh:
+//   i*3     — stencil back  (writes stencil)
+//   i*3 + 1 — stencil front (writes stencil)
+//   i*3 + 2 — cap quad      (renders where stencil != 0, resets
+//                            stencil to 0 via ReplaceStencilOp so the
+//                            next solid starts clean)
+//   N*3 + i — user mesh color (renders last)
+const sectionBundles = new Map();  // nodeId -> { back, front, cap }
+
+function buildSectionBundle(userMesh) {
+  const back = new THREE.Mesh(userMesh.geometry, makeStencilBackMaterial());
+  const front = new THREE.Mesh(userMesh.geometry, makeStencilFrontMaterial());
+  // The shadow meshes share the user mesh's geometry but live as
+  // separate scene nodes; reparenting under userMesh would inherit
+  // the world matrix automatically, which is the cleanest sync path.
+  userMesh.add(back);
+  userMesh.add(front);
+  const cap = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), makeCapMaterial());
+  cap.name = `section-cap-${userMesh.userData.id}`;
+  cap.frustumCulled = false;
+  scene.add(cap);
+  return { back, front, cap };
+}
+
+function teardownSectionBundle(bundle) {
+  bundle.back.parent?.remove(bundle.back);
+  bundle.front.parent?.remove(bundle.front);
+  scene.remove(bundle.cap);
+  bundle.back.material.dispose();
+  bundle.front.material.dispose();
+  bundle.cap.material.dispose();
+  bundle.cap.geometry.dispose();
+}
+
+function refreshSectionBundles() {
+  // Tear down whatever's there.
+  for (const b of sectionBundles.values()) teardownSectionBundle(b);
+  sectionBundles.clear();
+  if (sectionAxis === null) {
+    for (const m of meshMap.values()) m.renderOrder = 0;
+    return;
+  }
+  const userMeshes = [...meshMap.values()];
+  const N = userMeshes.length;
+  const axisColor = SECTION_AXES[sectionAxis].color;
+  for (let i = 0; i < N; i++) {
+    const m = userMeshes[i];
+    const bundle = buildSectionBundle(m);
+    bundle.back.renderOrder = i * 3;
+    bundle.front.renderOrder = i * 3 + 1;
+    bundle.cap.renderOrder = i * 3 + 2;
+    bundle.cap.material.color.setHex(axisColor);
+    sectionBundles.set(m.userData.id, bundle);
+    m.renderOrder = N * 3 + i;
+  }
+}
+
+function updateSectionCapTransforms() {
+  // Each frame, sync every cap quad to the visualization plane so
+  // the cap moves live as the user drags the gizmo.
+  for (const bundle of sectionBundles.values()) {
+    bundle.cap.position.copy(sectionViz.position);
+    bundle.cap.quaternion.copy(sectionViz.quaternion);
+    bundle.cap.scale.copy(sectionViz.scale);
+  }
+}
+
 function sectionSceneBbox() {
   const box = new THREE.Box3();
   for (const m of meshMap.values()) box.expandByObject(m);
@@ -188,7 +391,8 @@ function setSection(axis) {
   }
 
   if (axis === null) {
-    meshMaterial.clippingPlanes = [];
+    for (const mesh of meshMap.values()) applyCurrentSectionTo(mesh.material);
+    refreshSectionBundles();
     sectionViz.visible = false;
     transformControls.enabled = false;
     transformControls.visible = false;
@@ -230,7 +434,11 @@ function setSection(axis) {
   // same Plane reference each frame, so further drags update the
   // clip without re-touching the material.
   sectionPlane.setFromNormalAndCoplanarPoint(sectionPlane.normal, mid);
-  meshMaterial.clippingPlanes = [sectionPlane];
+  for (const mesh of meshMap.values()) applyCurrentSectionTo(mesh.material);
+
+  // Build the per-mesh stencil + cap bundles, set renderOrder so the
+  // stencil and cap passes happen before the regular color pass.
+  refreshSectionBundles();
 
   // TransformControls: show only the active-axis handle so the user
   // can't accidentally drag off-plane.
@@ -264,7 +472,8 @@ function applyNodeUpdate(node) {
   let mesh = meshMap.get(node.id);
   const geom = decodeMesh(node.mesh);
   if (!mesh) {
-    mesh = new THREE.Mesh(geom, meshMaterial);
+    const material = makeMeshMaterial(node.id);
+    mesh = new THREE.Mesh(geom, material);
     mesh.name = node.id;
     mesh.userData = { id: node.id, kind: node.kind };
     meshMap.set(node.id, mesh);
@@ -281,6 +490,11 @@ function removeNode(nodeId) {
   if (!mesh) return;
   scene.remove(mesh);
   mesh.geometry.dispose();
+  // Per-mesh materials live and die with their mesh — clean up the
+  // material too so we don't leak texture/uniform handles.
+  if (mesh.material && typeof mesh.material.dispose === "function") {
+    mesh.material.dispose();
+  }
   meshMap.delete(nodeId);
 }
 
@@ -291,12 +505,14 @@ function clearAllNodes() {
 function applySceneInit(payload) {
   clearAllNodes();
   for (const node of payload.nodes) applyNodeUpdate(node);
+  if (sectionAxis !== null) refreshSectionBundles();
 }
 
 function applySceneDelta(payload) {
   for (const node of payload.added || []) applyNodeUpdate(node);
   for (const node of payload.updated || []) applyNodeUpdate(node);
   for (const id of payload.removed || []) removeNode(id);
+  if (sectionAxis !== null) refreshSectionBundles();
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +542,11 @@ function resize() {
 function frame() {
   resize();
   controls.update();
+  if (sectionAxis !== null) {
+    // Section bundles ride the visualization plane; update each frame
+    // so the cap follows the drag handle.
+    updateSectionCapTransforms();
+  }
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
@@ -1185,10 +1406,24 @@ window.fastcad.cameraState = () => ({
 });
 // Section plane introspection for tests.
 window.fastcad.setSection = setSection;
-window.fastcad.sectionState = () => ({
-  axis: sectionAxis,
-  clippingPlaneCount: (meshMaterial.clippingPlanes || []).length,
-  vizVisible: sectionViz.visible,
-  planeConstant: sectionPlane.constant,
-  planeNormal: sectionPlane.normal.toArray(),
-});
+window.fastcad.sectionBundles = sectionBundles;
+window.fastcad.colorForId = colorForId;
+window.fastcad.sectionState = () => {
+  // Every per-mesh material gets the same clipping plane setup, so
+  // looking at any one of them is enough; tests just want to know
+  // "is clipping currently active". Empty scene → 0.
+  const first = meshMap.values().next().value;
+  const planes = first ? (first.material.clippingPlanes || []) : [];
+  // Pick any one bundle for color introspection — caps share the
+  // axis tint, so any of them tells you the active axis color.
+  const anyBundle = sectionBundles.values().next().value;
+  return {
+    axis: sectionAxis,
+    clippingPlaneCount: planes.length,
+    vizVisible: sectionViz.visible,
+    planeConstant: sectionPlane.constant,
+    planeNormal: sectionPlane.normal.toArray(),
+    bundleCount: sectionBundles.size,
+    capColor: anyBundle ? anyBundle.cap.material.color.getHex() : null,
+  };
+};
