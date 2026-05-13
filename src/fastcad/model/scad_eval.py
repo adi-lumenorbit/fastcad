@@ -97,9 +97,25 @@ class ModuleEval:
 # ---------------------------------------------------------------------------
 
 
+# Defaults for OpenSCAD special variables. Real OpenSCAD seeds these
+# from the application (render-mode flag, animation time, viewport
+# camera). fastcad always renders, never previews, so `$preview` is
+# false; there's no animation timeline so `$t` is zero. Files that
+# branch on these still load, which lets real-world .scad open
+# without forcing the user to strip the conditionals.
+_SPECIAL_VAR_DEFAULTS: dict[str, Value] = {
+    "$preview": False,
+    "$t": 0.0,
+}
+
+
+def _initial_vars() -> dict[str, Value]:
+    return dict(_SPECIAL_VAR_DEFAULTS)
+
+
 @dataclass
 class Env:
-    vars: dict[str, Value] = field(default_factory=dict)
+    vars: dict[str, Value] = field(default_factory=_initial_vars)
     modules: dict[str, ModuleDef] = field(default_factory=dict)
     # Assignments by name, kept as AST nodes for content-hashing
     var_defs: dict[str, Assignment] = field(default_factory=dict)
@@ -756,6 +772,20 @@ def _builtin_intersection(call: ModuleCall, env: Env) -> Geometry:
     return base
 
 
+def _builtin_hull(call: ModuleCall, env: Env) -> Geometry:
+    # Convex hull of all children. `eval_stmts` already unions the
+    # children into a single Manifold (or CrossSection); the convex
+    # hull depends only on the extreme points of that union, which
+    # are unchanged by boolean union — so `union.hull()` gives the
+    # same result as `manifold3d.batch_hull([child1, child2, ...])`.
+    # Works uniformly for 3D and 2D children because both
+    # `Manifold` and `CrossSection` expose `.hull()`.
+    child = eval_stmts(call.children, env)
+    if child is None:
+        return None
+    return child.hull()
+
+
 _BUILTIN_MODULES = {
     "cube": _builtin_cube,
     "sphere": _builtin_sphere,
@@ -773,6 +803,7 @@ _BUILTIN_MODULES = {
     "union": _builtin_union,
     "difference": _builtin_difference,
     "intersection": _builtin_intersection,
+    "hull": _builtin_hull,
 }
 
 

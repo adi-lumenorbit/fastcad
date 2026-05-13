@@ -94,10 +94,10 @@ Built-in modules:
 - Extrusions: `linear_extrude(height=, twist=, scale=)` and
   `rotate_extrude(angle=)` consume 2D children to produce 3D
 - Transforms: `translate`, `rotate`, `scale`, `mirror`
-- CSG: `union`, `difference`, `intersection`
+- CSG: `union`, `difference`, `intersection`, `hull`
 
 Out of scope (parser will reject): `function` definitions, `include`,
-`use`, `import`, `hull`, `minkowski`, `offset`, `projection`, `text`,
+`use`, `import`, `minkowski`, `offset`, `projection`, `text`,
 `surface`, `assert`, `echo`. **Do not use external libraries** under
 any circumstance — fastcad has no `include`/`use` mechanism.
 

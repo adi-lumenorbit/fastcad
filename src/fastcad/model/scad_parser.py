@@ -246,7 +246,14 @@ let_stmt: "let" "(" let_bindings ")" body
 ?body: block | stmt
 
 mod_call_stmt: mod_call mod_tail
-mod_call: CNAME "(" arg_list? ")"
+// `for` / `if` / `else` / `let` are reserved keywords; without this
+// exclusion, `rotate(...) for(...) { ... }` parses the inner `for`
+// as a module call named `for` (because `for(i=[0:3])` happens to
+// match the mod_call shape) instead of falling through to `for_stmt`.
+// Excluding the keywords here forces the parser to use the dedicated
+// control-flow rules.
+MOD_NAME: /(?!(?:for|if|else|let|module|function|true|false|undef)\b)[a-zA-Z_][a-zA-Z0-9_]*/
+mod_call: MOD_NAME "(" arg_list? ")"
 ?mod_tail: ";"                  -> empty_tail
         | block                 -> block_tail
         | mod_call_stmt         -> single_tail
@@ -537,7 +544,6 @@ _BANNED_KEYWORD_HINTS = (
     ("include <", "`include` is not supported (no external libraries). Inline geometry or define modules directly."),
     ("use <", "`use` is not supported (no external libraries). Inline geometry or define modules directly."),
     ("import(", "`import` is not supported in v1. Use polyhedron(...) for raw mesh data."),
-    ("hull(", "`hull()` is out of v1 scope. Build the geometry from primitives + booleans."),
     ("minkowski(", "`minkowski()` is out of v1 scope."),
     ("offset(", "`offset()` is out of v1 scope."),
     ("projection(", "`projection()` is out of v1 scope."),
